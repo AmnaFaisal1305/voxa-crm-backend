@@ -30,7 +30,7 @@ exports.createForm = async (req, res) => {
       access_token: token
     };
 
-    const url = `https://graph.facebook.com/v22.0/${adAccountId}/leadgen_forms`;
+    const url = `https://graph.facebook.com/v22.0/${pageId}/leadgen_forms`;
     
     console.log(`Publishing form "${name}" to Meta Ad Account ${adAccountId}`);
     
