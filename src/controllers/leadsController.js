@@ -7,10 +7,12 @@ const pool = require('../config/db');
 exports.getLeads = async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT id, full_name, email, phone, form_id, form_name,
-              lead_status, assigned_agent, created_at
-       FROM leads
-       ORDER BY created_at DESC
+      `SELECT l.id, l.full_name, l.email, l.phone, l.form_id,
+              COALESCE(l.form_name, mf.form_name) AS form_name,
+              l.lead_status, l.assigned_agent, l.created_at
+       FROM leads l
+       LEFT JOIN meta_forms mf ON l.form_id = mf.meta_form_id
+       ORDER BY l.created_at DESC
        LIMIT 100`
     );
     
