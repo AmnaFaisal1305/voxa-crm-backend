@@ -20,11 +20,19 @@ exports.createForm = async (req, res) => {
     const adAccountId = process.env.META_AD_ACCOUNT_ID;
     const pageId = process.env.META_PAGE_ID;
 
+    // Meta built-in types must not include label or key — only CUSTOM types get those fields
+    const BUILTIN_TYPES = ['FULL_NAME', 'EMAIL', 'PHONE', 'DATE_TIME', 'STREET_ADDRESS', 'CITY', 'STATE', 'COUNTRY', 'ZIP', 'POST_CODE', 'GENDER', 'MARITAL_STATUS', 'RELATIONSHIP_STATUS', 'MILITARY_STATUS', 'WORK_PHONE_NUMBER', 'WORK_EMAIL'];
+    const sanitizedQuestions = (Array.isArray(questions) ? questions : JSON.parse(questions)).map(q => {
+      if (BUILTIN_TYPES.includes(q.type)) return { type: q.type };
+      return { type: q.type, label: q.label, key: q.key };
+    });
+
     // Build the payload as required by Meta Lead Ads Form API
     const payload = {
       name,
-      questions: typeof questions === 'string' ? questions : JSON.stringify(questions),
+      questions: JSON.stringify(sanitizedQuestions),
       privacy_policy: JSON.stringify(privacy_policy || { url: 'https://voxa-crm.vercel.app/privacy-policy' }),
+      follow_up_action_url: 'https://voxa-crm.vercel.app',
       locale: 'en_US',
       page_id: pageId,
       access_token: token
