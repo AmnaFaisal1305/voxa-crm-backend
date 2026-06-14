@@ -1,6 +1,9 @@
 const axios = require('axios');
 const pool = require('../config/db');
 
+// Warm up DB connection on cold start so the first webhook doesn't pay the full connection cost
+pool.query('SELECT 1').catch(() => {});
+
 /**
  * Verification handler for Meta webhook registration.
  * Meta Developer Portal calls this with hub.mode, hub.verify_token, and hub.challenge.
@@ -21,17 +24,17 @@ exports.verifyWebhook = (req, res) => {
 
 /**
  * Post handler for receiving Lead Ads webhook notifications from Meta.
- * Responds 200 immediately (Meta requires < 5 seconds), then processes the lead.
- * Vercel Node.js runtime continues executing after res.send() up to the function timeout.
+ * Processes the lead first, responds 200 in finally — guarantees the DB insert
+ * completes before the response is sent. Vercel freezes the function after res.send()
+ * when Meta closes the connection, so async-after-respond is not reliable here.
+ * The module-level warm-up query above eliminates the Neon cold-start delay so
+ * processing consistently completes within Meta's 5-second window.
  */
 exports.receiveWebhook = async (req, res) => {
-  // Respond immediately — must happen before any async work
-  res.status(200).send('EVENT_RECEIVED');
-
   try {
     const entry  = req.body.entry?.[0];
     const change = entry?.changes?.[0];
-    if (change?.field !== 'leadgen') return;
+    if (change?.field !== 'leadgen') return res.status(200).send('EVENT_RECEIVED');
 
     const leadgenId = change.value.leadgen_id;
     const formId    = change.value.form_id || '';
@@ -58,5 +61,7 @@ exports.receiveWebhook = async (req, res) => {
     console.log(`Stored: ${fullName} | ${email} | ${phone}`);
   } catch (err) {
     console.error('Webhook error:', err.response?.data || err.message);
+  } finally {
+    res.status(200).send('EVENT_RECEIVED');
   }
 };
