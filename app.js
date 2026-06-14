@@ -32,16 +32,6 @@ app.get('/', (req, res) => {
   });
 });
 
-// Temporary debug endpoint — remove after token is confirmed
-app.get('/debug/token', (req, res) => {
-  const token = process.env.META_PAGE_ACCESS_TOKEN || '';
-  res.json({
-    token_prefix: token.slice(0, 20),
-    token_suffix: token.slice(-10),
-    token_length: token.length
-  });
-});
-
 // Route registration
 app.use('/webhook', webhookRoutes);
 app.use('/api/forms', formRoutes);
