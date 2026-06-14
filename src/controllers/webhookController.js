@@ -35,10 +35,11 @@ exports.receiveWebhook = async (req, res) => {
     }
 
     const leadgenId = change.value.leadgen_id;
+    const formId    = change.value.form_id || '';   // form_id comes from the webhook payload, not the leadgen fetch
     const token     = process.env.META_PAGE_ACCESS_TOKEN;
     const url       = `https://graph.facebook.com/v25.0/${leadgenId}?access_token=${token}`;
 
-    console.log(`Processing lead event for leadgen_id: ${leadgenId}`);
+    console.log(`Processing lead event for leadgen_id: ${leadgenId}, form_id: ${formId}`);
 
     const { data } = await axios.get(url);
 
@@ -54,7 +55,7 @@ exports.receiveWebhook = async (req, res) => {
     await pool.query(
       `INSERT INTO leads (full_name, email, phone, form_id, raw_data)
        VALUES ($1, $2, $3, $4, $5)`,
-      [fullName, email, phone, data.form_id || '', JSON.stringify(data)]
+      [fullName, email, phone, formId, JSON.stringify(data)]
     );
 
     console.log(`Stored lead: ${fullName} | ${email} | ${phone}`);
