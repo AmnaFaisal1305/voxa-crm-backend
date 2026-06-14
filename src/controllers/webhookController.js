@@ -37,7 +37,7 @@ exports.receiveWebhook = async (req, res) => {
 
     const leadgenId = change.value.leadgen_id;
     const token = process.env.META_PAGE_ACCESS_TOKEN;
-    const url = `https://graph.facebook.com/v22.0/${leadgenId}?access_token=${token}`;
+    const url = `https://graph.facebook.com/v25.0/${leadgenId}?access_token=${token}`;
 
     console.log(`Processing lead event for leadgen_id: ${leadgenId}`);
     
