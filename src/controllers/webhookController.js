@@ -21,32 +21,29 @@ exports.verifyWebhook = (req, res) => {
 
 /**
  * Post handler for receiving Lead Ads webhook notifications from Meta.
- * Processes the lead first, then responds 200 — required because Vercel serverless
- * terminates the function immediately after res.send(), killing any async work after it.
- * Meta's 5-second response window is met since fetch + DB insert takes ~1-2 seconds.
+ * Responds 200 immediately (Meta requires < 5 seconds), then processes the lead.
+ * Vercel Node.js runtime continues executing after res.send() up to the function timeout.
  */
 exports.receiveWebhook = async (req, res) => {
+  // Respond immediately — must happen before any async work
+  res.status(200).send('EVENT_RECEIVED');
+
   try {
     const entry  = req.body.entry?.[0];
     const change = entry?.changes?.[0];
-
-    if (change?.field !== 'leadgen') {
-      return res.status(200).send('EVENT_RECEIVED');
-    }
+    if (change?.field !== 'leadgen') return;
 
     const leadgenId = change.value.leadgen_id;
-    const formId    = change.value.form_id || '';   // form_id comes from the webhook payload, not the leadgen fetch
+    const formId    = change.value.form_id || '';
     const token     = process.env.META_PAGE_ACCESS_TOKEN;
     const url       = `https://graph.facebook.com/v25.0/${leadgenId}?access_token=${token}`;
 
-    console.log(`Processing lead event for leadgen_id: ${leadgenId}, form_id: ${formId}`);
+    console.log(`Processing lead: leadgen_id=${leadgenId} form_id=${formId}`);
 
     const { data } = await axios.get(url);
 
     const fields = {};
-    if (data.field_data && Array.isArray(data.field_data)) {
-      data.field_data.forEach(f => { fields[f.name] = f.values?.[0] || ''; });
-    }
+    data.field_data?.forEach(f => { fields[f.name] = f.values?.[0] || ''; });
 
     const fullName = fields.full_name    || fields.name  || '';
     const email    = fields.email        || '';
@@ -58,10 +55,8 @@ exports.receiveWebhook = async (req, res) => {
       [fullName, email, phone, formId, JSON.stringify(data)]
     );
 
-    console.log(`Stored lead: ${fullName} | ${email} | ${phone}`);
+    console.log(`Stored: ${fullName} | ${email} | ${phone}`);
   } catch (err) {
-    console.error('Webhook processing error:', err.response?.data || err.message);
-  } finally {
-    res.status(200).send('EVENT_RECEIVED');
+    console.error('Webhook error:', err.response?.data || err.message);
   }
 };
