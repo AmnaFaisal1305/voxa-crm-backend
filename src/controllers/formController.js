@@ -1,6 +1,36 @@
 const axios = require('axios');
 const pool = require('../config/db');
 
+exports.getForms = async (req, res) => {
+  try {
+    const token  = process.env.META_PAGE_ACCESS_TOKEN;
+    const pageId = process.env.META_PAGE_ID;
+
+    const { data } = await axios.get(
+      `https://graph.facebook.com/v25.0/${pageId}/leadgen_forms`,
+      { params: { access_token: token, fields: 'id,name,status,created_time,leads_count', limit: 100 } }
+    );
+
+    // Flag forms that were created through VOXA
+    const dbResult = await pool.query('SELECT meta_form_id FROM meta_forms');
+    const voxaFormIds = new Set(dbResult.rows.map(r => r.meta_form_id));
+
+    const forms = (data.data || []).map(form => ({
+      id:               form.id,
+      name:             form.name,
+      status:           form.status,
+      created_time:     form.created_time,
+      leads_count:      form.leads_count ?? 0,
+      created_via_voxa: voxaFormIds.has(form.id),
+    }));
+
+    res.json({ success: true, forms });
+  } catch (err) {
+    console.error('Error fetching forms:', err.response?.data || err.message);
+    res.status(500).json({ success: false, error: err.response?.data || err.message });
+  }
+};
+
 /**
  * Creates a Leadgen Form on Meta Ads and saves its reference locally.
  * React Frontend sends form name, questions, and optional privacy policy URL.

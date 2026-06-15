@@ -1,8 +1,8 @@
 const express = require('express');
 const router = express.Router();
-const { createForm } = require('../controllers/formController');
+const { createForm, getForms } = require('../controllers/formController');
 
-// React calls POST /api/forms/create to publish a form to Meta
+router.get('/', getForms);
 router.post('/create', createForm);
 
 module.exports = router;
