@@ -31,6 +31,31 @@ exports.getForms = async (req, res) => {
   }
 };
 
+exports.archiveForm = async (req, res) => {
+  const { id } = req.params;
+  if (!id) return res.status(400).json({ success: false, error: 'Form ID is required.' });
+
+  try {
+    const token = process.env.META_PAGE_ACCESS_TOKEN;
+
+    // Archive on Meta (permanent — Meta does not support true deletion)
+    await axios.post(
+      `https://graph.facebook.com/v25.0/${id}`,
+      new URLSearchParams({ status: 'ARCHIVED', access_token: token }).toString(),
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+    );
+
+    // Remove from our DB if it was created via VOXA
+    await pool.query('DELETE FROM meta_forms WHERE meta_form_id = $1', [id]);
+
+    console.log(`Form ${id} archived on Meta and removed from DB.`);
+    res.json({ success: true, archived_form_id: id });
+  } catch (err) {
+    console.error('Archive form error:', err.response?.data || err.message);
+    res.status(500).json({ success: false, error: err.response?.data || err.message });
+  }
+};
+
 /**
  * Creates a Leadgen Form on Meta Ads and saves its reference locally.
  * React Frontend sends form name, questions, and optional privacy policy URL.
