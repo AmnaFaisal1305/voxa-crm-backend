@@ -1,8 +1,8 @@
 const express = require('express');
 const router = express.Router();
-const { getLeads } = require('../controllers/leadsController');
+const { getLeads, syncLeads } = require('../controllers/leadsController');
 
-// React calls GET /api/leads to retrieve list of captured leads
 router.get('/', getLeads);
+router.post('/sync', syncLeads);
 
 module.exports = router;

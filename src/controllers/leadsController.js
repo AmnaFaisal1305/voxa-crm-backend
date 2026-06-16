@@ -1,3 +1,4 @@
+const axios = require('axios');
 const pool = require('../config/db');
 
 /**
@@ -26,5 +27,61 @@ exports.getLeads = async (req, res) => {
       success: false,
       error: err.message
     });
+  }
+};
+
+/**
+ * Fetches all existing leads from Meta for every form on the page
+ * and stores any not already in the DB. Safe to call multiple times.
+ */
+exports.syncLeads = async (req, res) => {
+  try {
+    const token  = process.env.META_PAGE_ACCESS_TOKEN;
+    const pageId = process.env.META_PAGE_ID;
+
+    const { data: formsData } = await axios.get(
+      `https://graph.facebook.com/v25.0/${pageId}/leadgen_forms`,
+      { params: { access_token: token, fields: 'id,name,leads_count', limit: 100 } }
+    );
+
+    let inserted = 0;
+    let skipped  = 0;
+
+    for (const form of (formsData.data || [])) {
+      if (!form.leads_count || form.leads_count === 0) continue;
+
+      const { data: leadsData } = await axios.get(
+        `https://graph.facebook.com/v25.0/${form.id}/leads`,
+        { params: { access_token: token, fields: 'id,created_time,field_data', limit: 100 } }
+      );
+
+      for (const lead of (leadsData.data || [])) {
+        const fields = {};
+        lead.field_data?.forEach(f => { fields[f.name] = f.values?.[0] || ''; });
+
+        const fullName = fields.full_name    || fields.name  || '';
+        const email    = fields.email        || '';
+        const phone    = fields.phone_number || fields.phone || '';
+
+        // Use leadgen id stored in raw_data to avoid inserting duplicates
+        const result = await pool.query(
+          `INSERT INTO leads (full_name, email, phone, form_id, raw_data)
+           SELECT $1, $2, $3, $4, $5
+           WHERE NOT EXISTS (
+             SELECT 1 FROM leads WHERE raw_data::json->>'id' = $6
+           )`,
+          [fullName, email, phone, form.id, JSON.stringify(lead), lead.id]
+        );
+
+        if (result.rowCount > 0) inserted++;
+        else skipped++;
+      }
+    }
+
+    console.log(`Sync complete: ${inserted} inserted, ${skipped} skipped`);
+    res.json({ success: true, inserted, skipped });
+  } catch (err) {
+    console.error('Sync leads error:', err.response?.data || err.message);
+    res.status(500).json({ success: false, error: err.response?.data || err.message });
   }
 };
