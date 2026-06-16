@@ -63,7 +63,14 @@ exports.syncLeads = async (req, res) => {
         const email    = fields.email        || '';
         const phone    = fields.phone_number || fields.phone || '';
 
-        // Use leadgen id stored in raw_data to avoid inserting duplicates
+        // Patch form_name on any existing lead that was stored without it
+        await pool.query(
+          `UPDATE leads SET form_name = $1
+           WHERE raw_data::json->>'id' = $2 AND form_name IS NULL`,
+          [form.name, lead.id]
+        );
+
+        // Insert if not already present
         const result = await pool.query(
           `INSERT INTO leads (full_name, email, phone, form_id, form_name, raw_data)
            SELECT $1, $2, $3, $4, $5, $6
