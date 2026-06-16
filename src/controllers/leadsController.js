@@ -65,12 +65,12 @@ exports.syncLeads = async (req, res) => {
 
         // Use leadgen id stored in raw_data to avoid inserting duplicates
         const result = await pool.query(
-          `INSERT INTO leads (full_name, email, phone, form_id, raw_data)
-           SELECT $1, $2, $3, $4, $5
+          `INSERT INTO leads (full_name, email, phone, form_id, form_name, raw_data)
+           SELECT $1, $2, $3, $4, $5, $6
            WHERE NOT EXISTS (
-             SELECT 1 FROM leads WHERE raw_data::json->>'id' = $6
+             SELECT 1 FROM leads WHERE raw_data::json->>'id' = $7
            )`,
-          [fullName, email, phone, form.id, JSON.stringify(lead), lead.id]
+          [fullName, email, phone, form.id, form.name, JSON.stringify(lead), lead.id]
         );
 
         if (result.rowCount > 0) inserted++;

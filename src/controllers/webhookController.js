@@ -43,7 +43,13 @@ exports.receiveWebhook = async (req, res) => {
 
     console.log(`Processing lead: leadgen_id=${leadgenId} form_id=${formId}`);
 
-    const { data } = await axios.get(url);
+    const [{ data }, formRow] = await Promise.all([
+      axios.get(url),
+      pool.query(
+        `SELECT form_name FROM meta_forms WHERE meta_form_id = $1 LIMIT 1`,
+        [formId]
+      )
+    ]);
 
     const fields = {};
     data.field_data?.forEach(f => { fields[f.name] = f.values?.[0] || ''; });
@@ -51,11 +57,12 @@ exports.receiveWebhook = async (req, res) => {
     const fullName = fields.full_name    || fields.name  || '';
     const email    = fields.email        || '';
     const phone    = fields.phone_number || fields.phone  || '';
+    const formName = formRow.rows[0]?.form_name || null;
 
     await pool.query(
-      `INSERT INTO leads (full_name, email, phone, form_id, raw_data)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [fullName, email, phone, formId, JSON.stringify(data)]
+      `INSERT INTO leads (full_name, email, phone, form_id, form_name, raw_data)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [fullName, email, phone, formId, formName, JSON.stringify(data)]
     );
 
     console.log(`Stored: ${fullName} | ${email} | ${phone}`);
