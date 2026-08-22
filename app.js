@@ -6,6 +6,7 @@ const bodyParser = require('body-parser');
 const webhookRoutes = require('./src/routes/webhook');
 const formRoutes = require('./src/routes/forms');
 const leadsRoutes = require('./src/routes/leads');
+const messagesRoutes = require('./src/routes/messages');
 
 const app = express();
 
@@ -36,6 +37,7 @@ app.get('/', (req, res) => {
 app.use('/webhook', webhookRoutes);
 app.use('/api/forms', formRoutes);
 app.use('/api/leads', leadsRoutes);
+app.use('/api/messages', messagesRoutes);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {

@@ -1,5 +1,6 @@
 const axios = require('axios');
 const pool = require('../config/db');
+const { handleInboundMessage } = require('./messagesController');
 
 // Warm up DB connection on cold start so the first webhook doesn't pay the full connection cost
 pool.query('SELECT 1').catch(() => {});
@@ -34,6 +35,21 @@ exports.receiveWebhook = async (req, res) => {
   try {
     const entry  = req.body.entry?.[0];
     const change = entry?.changes?.[0];
+
+    if (change?.field === 'messages') {
+      const messaging = entry?.messaging?.[0];
+      if (!messaging || messaging.message?.is_echo) return;
+      const psid = messaging.sender?.id;
+      const text = messaging.message?.text || '';
+      const mid  = messaging.message?.mid  || null;
+      if (psid && text) {
+        handleInboundMessage(psid, text, mid).catch(err =>
+          console.error('Messenger webhook error:', err)
+        );
+      }
+      return;
+    }
+
     if (change?.field !== 'leadgen') return res.status(200).send('EVENT_RECEIVED');
 
     const leadgenId = change.value.leadgen_id;
