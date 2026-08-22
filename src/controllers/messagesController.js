@@ -3,39 +3,64 @@ const pool = require('../config/db');
 
 exports.getConversations = async (req, res) => {
   try {
-    const result = await pool.query(
-      `SELECT c.psid, c.display_name, c.last_message_at,
-              m.content AS last_message, m.direction AS last_direction
-       FROM conversations c
-       LEFT JOIN LATERAL (
-         SELECT content, direction FROM messages
-         WHERE conversation_id = c.id
-         ORDER BY sent_at DESC LIMIT 1
-       ) m ON true
-       ORDER BY c.last_message_at DESC NULLS LAST`
+    const token  = process.env.META_PAGE_ACCESS_TOKEN;
+    const pageId = process.env.META_PAGE_ID;
+
+    const { data } = await axios.get(
+      `https://graph.facebook.com/v25.0/${pageId}/conversations`,
+      { params: { platform: 'messenger', fields: 'participants,snippet,updated_time', access_token: token, limit: 100 } }
     );
-    res.json({ success: true, conversations: result.rows });
+
+    const conversations = (data.data || []).map(conv => {
+      const customer = (conv.participants?.data || []).find(p => p.id !== pageId);
+      return {
+        thread_id:    conv.id,
+        psid:         customer?.id   || null,
+        display_name: customer?.name || null,
+        snippet:      conv.snippet,
+        updated_time: conv.updated_time,
+      };
+    });
+
+    res.json({ success: true, conversations });
   } catch (err) {
-    console.error('Error fetching conversations:', err.message);
-    res.status(500).json({ success: false, error: err.message });
+    console.error('Error fetching conversations:', err.response?.data || err.message);
+    res.status(500).json({ success: false, error: err.response?.data || err.message });
   }
 };
 
 exports.getThread = async (req, res) => {
   const { psid } = req.params;
   try {
-    const result = await pool.query(
-      `SELECT m.direction, m.content, m.sent_at
-       FROM messages m
-       JOIN conversations c ON m.conversation_id = c.id
-       WHERE c.psid = $1
-       ORDER BY m.sent_at ASC`,
-      [psid]
+    const token  = process.env.META_PAGE_ACCESS_TOKEN;
+    const pageId = process.env.META_PAGE_ID;
+
+    // Step 1 — find the conversation thread ID for this PSID
+    const convRes = await axios.get(
+      `https://graph.facebook.com/v25.0/${pageId}/conversations`,
+      { params: { platform: 'messenger', user_id: psid, fields: 'id', access_token: token } }
     );
-    res.json({ success: true, messages: result.rows });
+    const threadId = convRes.data?.data?.[0]?.id;
+    if (!threadId) return res.json({ success: true, messages: [] });
+
+    // Step 2 — fetch messages for that thread, newest first (Meta default), then reverse
+    const msgRes = await axios.get(
+      `https://graph.facebook.com/v25.0/${threadId}/messages`,
+      { params: { fields: 'message,from,created_time', access_token: token, limit: 100 } }
+    );
+
+    const messages = (msgRes.data?.data || [])
+      .reverse()
+      .map(m => ({
+        direction: m.from?.id === pageId ? 'outbound' : 'inbound',
+        content:   m.message || '',
+        sent_at:   m.created_time,
+      }));
+
+    res.json({ success: true, messages });
   } catch (err) {
-    console.error('Error fetching thread:', err.message);
-    res.status(500).json({ success: false, error: err.message });
+    console.error('Error fetching thread:', err.response?.data || err.message);
+    res.status(500).json({ success: false, error: err.response?.data || err.message });
   }
 };
 
