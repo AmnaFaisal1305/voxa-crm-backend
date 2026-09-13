@@ -27,7 +27,7 @@ exports.getForms = async (req, res) => {
     res.json({ success: true, forms });
   } catch (err) {
     console.error('Error fetching forms:', err.response?.data || err.message);
-    res.status(500).json({ success: false, error: err.response?.data || err.message });
+    res.status(500).json({ success: false, error: err.response?.data?.error?.message || err.message });
   }
 };
 
@@ -52,7 +52,7 @@ exports.archiveForm = async (req, res) => {
     res.json({ success: true, archived_form_id: id });
   } catch (err) {
     console.error('Archive form error:', err.response?.data || err.message);
-    res.status(500).json({ success: false, error: err.response?.data || err.message });
+    res.status(500).json({ success: false, error: err.response?.data?.error?.message || err.message });
   }
 };
 
@@ -114,9 +114,10 @@ exports.createForm = async (req, res) => {
     res.json({ success: true, form_id: data.id });
   } catch (err) {
     console.error('Form creation error:', err.response?.data || err.message);
+    const errMsg = err.response?.data?.error?.message || err.message;
     res.status(500).json({
       success: false,
-      error: err.response?.data || err.message
+      error: errMsg
     });
   }
 };
