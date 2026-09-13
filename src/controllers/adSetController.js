@@ -45,6 +45,7 @@ exports.createAdSet = async (req, res) => {
       optimization_goal = 'LEAD_GENERATION',
       billing_event = 'IMPRESSIONS',
       bid_amount,
+      destination_type = 'ON_AD',
     } = req.body;
 
     if (!name || !campaign_id) {
@@ -97,6 +98,7 @@ exports.createAdSet = async (req, res) => {
 
     // Required for OUTCOME_LEADS — tells Meta which Page the lead form belongs to
     payload.promoted_object = JSON.stringify({ page_id: getPageId() });
+    payload.destination_type = destination_type;
 
     const { data } = await axios.post(
       `${BASE}/${getAdAccount()}/adsets`,
