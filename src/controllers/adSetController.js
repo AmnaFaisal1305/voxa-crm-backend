@@ -53,10 +53,20 @@ exports.createAdSet = async (req, res) => {
       });
     }
 
-    if (!daily_budget && !lifetime_budget) {
+    // Fetch campaign to check bid_strategy and whether CBO is enabled
+    const { data: campaign } = await axios.get(`${BASE}/${campaign_id}`, {
+      params: { access_token: getToken(), fields: 'daily_budget,lifetime_budget,bid_strategy' },
+    });
+
+    const campaignHasBudget = campaign.daily_budget || campaign.lifetime_budget;
+    const bidStrategy = campaign.bid_strategy || 'LOWEST_COST_WITHOUT_CAP';
+
+    // bid_amount is required when campaign uses a cap-based bid strategy
+    const needsBidAmount = ['LOWEST_COST_WITH_BID_CAP', 'TARGET_COST'].includes(bidStrategy);
+    if (needsBidAmount && !bid_amount) {
       return res.status(400).json({
         success: false,
-        error: 'Either daily_budget or lifetime_budget is required.',
+        error: `Your campaign uses ${bidStrategy} — you must provide bid_amount (in cents) on the ad set. Example: bid_amount: 500 = PKR 5 max bid.`,
       });
     }
 
@@ -74,11 +84,15 @@ exports.createAdSet = async (req, res) => {
       }),
     };
 
-    if (daily_budget)   payload.daily_budget   = daily_budget;
-    if (lifetime_budget) payload.lifetime_budget = lifetime_budget;
-    if (start_time)     payload.start_time     = start_time;
-    if (end_time)       payload.end_time       = end_time;
-    if (bid_amount)     payload.bid_amount     = bid_amount;
+    // If campaign has CBO budget, ad set must NOT set its own budget
+    if (!campaignHasBudget) {
+      if (daily_budget)    payload.daily_budget    = daily_budget;
+      if (lifetime_budget) payload.lifetime_budget = lifetime_budget;
+    }
+
+    if (start_time)  payload.start_time  = start_time;
+    if (end_time)    payload.end_time    = end_time;
+    if (bid_amount)  payload.bid_amount  = bid_amount;
 
     const { data } = await axios.post(
       `${BASE}/${getAdAccount()}/adsets`,
@@ -94,7 +108,6 @@ exports.createAdSet = async (req, res) => {
     res.status(500).json({
       success: false,
       error: metaErr?.error_user_msg || metaErr?.message || err.message,
-      detail: metaErr || null,
     });
   }
 };
