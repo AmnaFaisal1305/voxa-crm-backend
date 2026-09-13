@@ -63,18 +63,19 @@ exports.createAdCreative = async (req, res) => {
       });
     }
 
+    const pageId = getPageId();
     const objectStorySpec = {
-      page_id: getPageId(),
+      page_id: pageId,
       link_data: {
         image_hash,
         message,
         name: headline,
-        description: description || '',
+        link: link_url || `https://www.facebook.com/${pageId}`,
+        ...(description ? { description } : {}),
         call_to_action: {
           type: cta_type,
           value: {
             lead_gen_form_id,
-            ...(link_url ? { link: link_url } : {}),
           },
         },
       },
@@ -96,9 +97,10 @@ exports.createAdCreative = async (req, res) => {
     res.json({ success: true, creative_id: data.id });
   } catch (err) {
     console.error('Ad creative creation error:', err.response?.data || err.message);
+    const metaErr = err.response?.data?.error;
     res.status(500).json({
       success: false,
-      error: err.response?.data?.error?.message || err.message,
+      error: metaErr?.error_user_msg || metaErr?.message || err.message,
     });
   }
 };
