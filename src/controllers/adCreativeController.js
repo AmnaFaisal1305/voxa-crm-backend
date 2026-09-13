@@ -70,7 +70,7 @@ exports.createAdCreative = async (req, res) => {
         image_hash,
         message,
         name: headline,
-        link: link_url || `https://www.facebook.com/${pageId}`,
+        link: link_url || 'https://voxa-crm.vercel.app',
         ...(description ? { description } : {}),
         call_to_action: {
           type: cta_type,
