@@ -2,7 +2,7 @@ const axios = require('axios');
 
 const BASE = 'https://graph.facebook.com/v25.0';
 
-const getToken = () => process.env.META_PAGE_ACCESS_TOKEN;
+const getToken = () => process.env.META_USER_ACCESS_TOKEN;
 const getAdAccount = () => process.env.META_AD_ACCOUNT_ID;
 
 exports.getCampaigns = async (req, res) => {
