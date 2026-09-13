@@ -57,11 +57,16 @@ exports.createCampaign = async (req, res) => {
       access_token: getToken(),
     };
 
-    if (daily_budget)   payload.daily_budget   = daily_budget;
+    if (daily_budget)    payload.daily_budget    = daily_budget;
     if (lifetime_budget) payload.lifetime_budget = lifetime_budget;
-    if (bid_strategy)   payload.bid_strategy   = bid_strategy;
-    if (start_time)     payload.start_time     = start_time;
-    if (stop_time)      payload.stop_time      = stop_time;
+    if (bid_strategy)    payload.bid_strategy    = bid_strategy;
+    if (start_time)      payload.start_time      = start_time;
+    if (stop_time)       payload.stop_time       = stop_time;
+
+    // Required by some ad accounts when no campaign-level budget is set
+    if (!daily_budget && !lifetime_budget) {
+      payload.is_adset_budget_sharing_enabled = false;
+    }
 
     const { data } = await axios.post(
       `${BASE}/${getAdAccount()}/campaigns`,
