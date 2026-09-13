@@ -3,6 +3,7 @@ const axios = require('axios');
 const BASE = 'https://graph.facebook.com/v25.0';
 const getToken = () => process.env.META_USER_ACCESS_TOKEN;
 const getAdAccount = () => process.env.META_AD_ACCOUNT_ID;
+const getPageId = () => process.env.META_PAGE_ID;
 
 exports.getAdSets = async (req, res) => {
   try {
@@ -93,6 +94,9 @@ exports.createAdSet = async (req, res) => {
     if (start_time)  payload.start_time  = start_time;
     if (end_time)    payload.end_time    = end_time;
     if (bid_amount)  payload.bid_amount  = bid_amount;
+
+    // Required for OUTCOME_LEADS — tells Meta which Page the lead form belongs to
+    payload.promoted_object = JSON.stringify({ page_id: getPageId() });
 
     const { data } = await axios.post(
       `${BASE}/${getAdAccount()}/adsets`,
