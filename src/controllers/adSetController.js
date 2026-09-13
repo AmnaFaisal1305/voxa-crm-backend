@@ -90,9 +90,11 @@ exports.createAdSet = async (req, res) => {
     res.json({ success: true, adset_id: data.id });
   } catch (err) {
     console.error('Ad set creation error:', err.response?.data || err.message);
+    const metaErr = err.response?.data?.error;
     res.status(500).json({
       success: false,
-      error: err.response?.data?.error?.message || err.message,
+      error: metaErr?.error_user_msg || metaErr?.message || err.message,
+      detail: metaErr || null,
     });
   }
 };
