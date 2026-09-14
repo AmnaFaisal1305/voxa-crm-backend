@@ -43,14 +43,18 @@ async function batchedAllSettled(items, batchSize = 3, delayMs = 300) {
   return results;
 }
 
-// Retry a single async call once after a delay if it rate-limits
-async function withRateLimitRetry(fn, retryDelayMs = 1500) {
-  try {
-    return await fn();
-  } catch (err) {
-    if (!isRateLimit(err)) throw err;
-    await new Promise((r) => setTimeout(r, retryDelayMs));
-    return await fn(); // throws again if still limited — caller handles it
+// Exponential-backoff retry on Meta rate limit (code 17).
+// Waits 2s → 4s → 8s before giving up (total up to ~14s of patience).
+async function withRateLimitRetry(fn, maxRetries = 3, baseDelayMs = 2000) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (!isRateLimit(err) || attempt === maxRetries) throw err;
+      const delay = baseDelayMs * Math.pow(2, attempt); // 2s, 4s, 8s
+      console.log(`Meta rate limit — retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`);
+      await new Promise((r) => setTimeout(r, delay));
+    }
   }
 }
 
@@ -305,53 +309,49 @@ exports.getCampaignDetails = async (req, res) => {
   ]);
   const rawPreset = req.query.date_preset || 'last_30d';
   const datePreset = rawPreset === 'lifetime' ? 'maximum' : (VALID_PRESETS.has(rawPreset) ? rawPreset : 'last_30d');
-
-  // Breakdowns are expensive (6 extra API calls). Only fetch when explicitly requested.
   const includeBreakdowns = req.query.include_breakdowns === 'true';
 
   const cacheKey = `detail:${id}:${datePreset}:${includeBreakdowns}`;
   const cached = cacheGet(cacheKey);
   if (cached) return res.json(cached);
 
+  const token = getToken();
+  const insightParams = { access_token: token, fields: INSIGHT_FIELDS, date_preset: datePreset };
+
+  const BREAKDOWN_FIELDS = 'spend,reach,impressions,clicks,ctr,cpm,cpc,actions,cost_per_action_type,action_values,date_start,date_stop';
+
+  const AD_FIELDS = [
+    'id', 'name', 'adset_id', 'campaign_id',
+    'status', 'effective_status', 'configured_status',
+    'creative{id,name,title,body,image_url,thumbnail_url,object_story_spec,call_to_action_type,link_url}',
+    'bid_amount', 'bid_type', 'bid_info',
+    'tracking_specs', 'conversion_specs',
+    'review_feedback', 'issues_info',
+    'preview_shareable_link',
+    'created_time', 'updated_time',
+  ].join(',');
+
+  const ADSET_FIELDS = [
+    'id', 'name', 'campaign_id', 'status', 'effective_status', 'configured_status',
+    'daily_budget', 'lifetime_budget', 'budget_remaining',
+    'daily_min_spend_target', 'daily_spend_cap', 'lifetime_min_spend_target', 'lifetime_spend_cap',
+    'bid_amount', 'bid_strategy', 'bid_constraints', 'pacing_type',
+    'optimization_goal', 'optimization_sub_event', 'billing_event',
+    'destination_type', 'promoted_object',
+    'targeting', 'targeting_optimization_types',
+    'frequency_control_specs', 'attribution_spec',
+    'start_time', 'end_time', 'created_time', 'updated_time',
+    'is_dynamic_creative', 'learning_stage_info', 'issues_info',
+    'adlabels', 'instagram_actor_id', 'source_adset_id',
+  ].join(',');
+
+  // ── CRITICAL PATH: campaign config + adsets (2 calls) ────────────────────
+  // One retry after 3 seconds if rate-limited. If still failing, fall back to
+  // whatever is in the list cache so the page shows something instead of an error.
+  let campaign, adSets;
   try {
-    const token = getToken();
-
-    const insightParams = {
-      access_token: token,
-      fields: INSIGHT_FIELDS,
-      date_preset: datePreset,
-    };
-
-    const BREAKDOWN_FIELDS = 'spend,reach,impressions,clicks,ctr,cpm,cpc,actions,cost_per_action_type,action_values,date_start,date_stop';
-
-    const AD_FIELDS = [
-      'id', 'name', 'adset_id', 'campaign_id',
-      'status', 'effective_status', 'configured_status',
-      'creative{id,name,title,body,image_url,thumbnail_url,object_story_spec,call_to_action_type,link_url}',
-      'bid_amount', 'bid_type', 'bid_info',
-      'tracking_specs', 'conversion_specs',
-      'review_feedback', 'issues_info',
-      'preview_shareable_link',
-      'created_time', 'updated_time',
-    ].join(',');
-
-    const ADSET_FIELDS = [
-      'id', 'name', 'campaign_id', 'status', 'effective_status', 'configured_status',
-      'daily_budget', 'lifetime_budget', 'budget_remaining',
-      'daily_min_spend_target', 'daily_spend_cap', 'lifetime_min_spend_target', 'lifetime_spend_cap',
-      'bid_amount', 'bid_strategy', 'bid_constraints', 'pacing_type',
-      'optimization_goal', 'optimization_sub_event', 'billing_event',
-      'destination_type', 'promoted_object',
-      'targeting', 'targeting_optimization_types',
-      'frequency_control_specs', 'attribution_spec',
-      'start_time', 'end_time', 'created_time', 'updated_time',
-      'is_dynamic_creative', 'learning_stage_info', 'issues_info',
-      'adlabels', 'instagram_actor_id', 'source_adset_id',
-    ].join(',');
-
-    // Batch 1 — config: campaign + adsets + all ads (3 calls, no insights yet)
-    const [campaignResp, adSetsResp, allAdsResp] = await withRateLimitRetry(() =>
-      Promise.all([
+    const [campaignResp, adSetsResp] = await withRateLimitRetry(
+      () => Promise.all([
         axios.get(`${BASE}/${id}`, {
           params: {
             access_token: token,
@@ -368,127 +368,115 @@ exports.getCampaignDetails = async (req, res) => {
         axios.get(`${BASE}/${id}/adsets`, {
           params: { access_token: token, fields: ADSET_FIELDS, limit: 100 },
         }).catch((err) => { if (isRateLimit(err)) throw err; return { data: { data: [] } }; }),
-        axios.get(`${BASE}/${id}/ads`, {
-          params: { access_token: token, fields: AD_FIELDS, limit: 200 },
-        }).catch((err) => { if (isRateLimit(err)) throw err; return { data: { data: [] } }; }),
-      ])
+      ]),
+      1,    // max 1 retry
+      3000  // 3 seconds before retry
     );
-
-    const campaign = campaignResp.data;
-    const adSets = adSetsResp.data.data || [];
-    const allAds = allAdsResp.data.data || [];
-
-    // Small gap before insight calls so the first batch's budget window resets slightly
-    await new Promise((r) => setTimeout(r, 400));
-
-    // Batch 2 — insights: 3 calls total regardless of how many adsets/ads there are.
-    // level=adset and level=ad return one row per entity, matched by id afterward.
-    const [campaignInsightResp, adsetInsightResp, adInsightResp] = await withRateLimitRetry(() =>
-      Promise.all([
-        axios.get(`${BASE}/${id}/insights`, { params: insightParams }).catch(() => null),
-        axios.get(`${BASE}/${id}/insights`, {
-          params: { ...insightParams, level: 'adset' },
-        }).catch(() => null),
-        axios.get(`${BASE}/${id}/insights`, {
-          params: { ...insightParams, level: 'ad' },
-        }).catch(() => null),
-      ])
-    );
-
-    // Build lookup maps: id → normalised insight row
-    const adsetInsightMap = {};
-    for (const row of (adsetInsightResp?.data?.data || [])) {
-      adsetInsightMap[row.adset_id] = normalizeActions([row]);
-    }
-    const adInsightMap = {};
-    for (const row of (adInsightResp?.data?.data || [])) {
-      adInsightMap[row.ad_id] = normalizeActions([row]);
-    }
-
-    // Group ads by adset_id
-    const adsByAdset = {};
-    for (const ad of allAds) {
-      if (!adsByAdset[ad.adset_id]) adsByAdset[ad.adset_id] = [];
-      adsByAdset[ad.adset_id].push(ad);
-    }
-
-    const finalAdSets = adSets.map((adset) => ({
-      ...adset,
-      insights: adsetInsightMap[adset.id] || null,
-      ads: (adsByAdset[adset.id] || []).map((ad) => ({
-        ...ad,
-        insights: adInsightMap[ad.id] || null,
-      })),
-    }));
-
-    const normalizeBreakdown = (resp) => {
-      const rows = resp?.data?.data || [];
-      return rows.map((row) => normalizeActions([row]));
-    };
-
-    // Breakdowns — only when caller explicitly requests them (6 extra calls)
-    let breakdowns = {};
-    if (includeBreakdowns) {
-      await new Promise((r) => setTimeout(r, 400)); // gap before breakdown burst
-
-      const [
-        ageBreakdownResp,
-        genderBreakdownResp,
-        placementBreakdownResp,
-        countryBreakdownResp,
-        deviceBreakdownResp,
-        dailySeriesResp,
-      ] = await Promise.all([
-        axios.get(`${BASE}/${id}/insights`, {
-          params: { ...insightParams, fields: BREAKDOWN_FIELDS, breakdowns: 'age' },
-        }).catch(() => null),
-        axios.get(`${BASE}/${id}/insights`, {
-          params: { ...insightParams, fields: BREAKDOWN_FIELDS, breakdowns: 'gender' },
-        }).catch(() => null),
-        axios.get(`${BASE}/${id}/insights`, {
-          params: { ...insightParams, fields: BREAKDOWN_FIELDS, breakdowns: 'publisher_platform,platform_position' },
-        }).catch(() => null),
-        axios.get(`${BASE}/${id}/insights`, {
-          params: { ...insightParams, fields: BREAKDOWN_FIELDS, breakdowns: 'country' },
-        }).catch(() => null),
-        axios.get(`${BASE}/${id}/insights`, {
-          params: { ...insightParams, fields: BREAKDOWN_FIELDS, breakdowns: 'impression_device' },
-        }).catch(() => null),
-        axios.get(`${BASE}/${id}/insights`, {
-          params: { ...insightParams, fields: BREAKDOWN_FIELDS, time_increment: 1 },
-        }).catch(() => null),
-      ]);
-
-      breakdowns = {
-        insights_by_age:       normalizeBreakdown(ageBreakdownResp),
-        insights_by_gender:    normalizeBreakdown(genderBreakdownResp),
-        insights_by_placement: normalizeBreakdown(placementBreakdownResp),
-        insights_by_country:   normalizeBreakdown(countryBreakdownResp),
-        insights_by_device:    normalizeBreakdown(deviceBreakdownResp),
-        insights_daily:        normalizeBreakdown(dailySeriesResp),
-      };
-    }
-
-    const responseData = {
-      success: true,
-      date_preset: datePreset,
-      campaign: {
-        ...campaign,
-        insights: normalizeActions(campaignInsightResp?.data?.data),
-        ...breakdowns,
-        adsets: finalAdSets,
-      },
-    };
-    cacheSet(cacheKey, responseData, 10 * 60_000); // 10-minute cache on campaign detail
-    res.json(responseData);
+    campaign = campaignResp.data;
+    adSets = adSetsResp.data.data || [];
   } catch (err) {
-    console.error('Error fetching campaign details:', err.response?.data || err.message);
-    if (err.response?.data?.error?.code === 17) return res.json(RATE_LIMIT_RESPONSE);
-    res.status(500).json({
-      success: false,
-      error: err.response?.data?.error?.message || err.message,
-    });
+    if (isRateLimit(err)) {
+      // Serve from list cache so the page isn't blank — adsets will be empty
+      const listCached = cacheGet(`list:${datePreset}`);
+      const fromList = listCached?.campaigns?.find((c) => c.id === id);
+      if (fromList) {
+        return res.json({
+          success: true,
+          date_preset: datePreset,
+          _degraded: true,
+          _degraded_reason: 'Meta rate limit — adsets temporarily unavailable',
+          campaign: { ...fromList, adsets: [] },
+        });
+      }
+      return res.json(RATE_LIMIT_RESPONSE);
+    }
+    return res.status(500).json({ success: false, error: err.response?.data?.error?.message || err.message });
   }
+
+  // ── OPTIONAL PATH: ads + insights (fail silently — never blocks the page) ─
+  // 500ms gap before the second burst so the critical calls' window can recover.
+  await new Promise((r) => setTimeout(r, 500));
+
+  const [allAdsResp, campaignInsightResp, adsetInsightResp, adInsightResp] = await Promise.all([
+    axios.get(`${BASE}/${id}/ads`, {
+      params: { access_token: token, fields: AD_FIELDS, limit: 200 },
+    }).catch(() => null),
+    axios.get(`${BASE}/${id}/insights`, { params: insightParams }).catch(() => null),
+    axios.get(`${BASE}/${id}/insights`, {
+      params: { ...insightParams, level: 'adset' },
+    }).catch(() => null),
+    axios.get(`${BASE}/${id}/insights`, {
+      params: { ...insightParams, level: 'ad' },
+    }).catch(() => null),
+  ]);
+
+  const allAds = allAdsResp?.data?.data || [];
+
+  // Build lookup maps: entity id → normalised insight row
+  const adsetInsightMap = {};
+  for (const row of (adsetInsightResp?.data?.data || [])) {
+    adsetInsightMap[row.adset_id] = normalizeActions([row]);
+  }
+  const adInsightMap = {};
+  for (const row of (adInsightResp?.data?.data || [])) {
+    adInsightMap[row.ad_id] = normalizeActions([row]);
+  }
+
+  // Group ads by adset_id
+  const adsByAdset = {};
+  for (const ad of allAds) {
+    if (!adsByAdset[ad.adset_id]) adsByAdset[ad.adset_id] = [];
+    adsByAdset[ad.adset_id].push(ad);
+  }
+
+  const finalAdSets = adSets.map((adset) => ({
+    ...adset,
+    insights: adsetInsightMap[adset.id] || null,
+    ads: (adsByAdset[adset.id] || []).map((ad) => ({
+      ...ad,
+      insights: adInsightMap[ad.id] || null,
+    })),
+  }));
+
+  const normalizeBreakdown = (resp) => (resp?.data?.data || []).map((row) => normalizeActions([row]));
+
+  // ── BREAKDOWNS: only when caller passes ?include_breakdowns=true ──────────
+  let breakdowns = {};
+  if (includeBreakdowns) {
+    await new Promise((r) => setTimeout(r, 500));
+    const [ageBd, genderBd, placementBd, countryBd, deviceBd, dailyBd] = await Promise.all([
+      axios.get(`${BASE}/${id}/insights`, { params: { ...insightParams, fields: BREAKDOWN_FIELDS, breakdowns: 'age' } }).catch(() => null),
+      axios.get(`${BASE}/${id}/insights`, { params: { ...insightParams, fields: BREAKDOWN_FIELDS, breakdowns: 'gender' } }).catch(() => null),
+      axios.get(`${BASE}/${id}/insights`, { params: { ...insightParams, fields: BREAKDOWN_FIELDS, breakdowns: 'publisher_platform,platform_position' } }).catch(() => null),
+      axios.get(`${BASE}/${id}/insights`, { params: { ...insightParams, fields: BREAKDOWN_FIELDS, breakdowns: 'country' } }).catch(() => null),
+      axios.get(`${BASE}/${id}/insights`, { params: { ...insightParams, fields: BREAKDOWN_FIELDS, breakdowns: 'impression_device' } }).catch(() => null),
+      axios.get(`${BASE}/${id}/insights`, { params: { ...insightParams, fields: BREAKDOWN_FIELDS, time_increment: 1 } }).catch(() => null),
+    ]);
+    breakdowns = {
+      insights_by_age:       normalizeBreakdown(ageBd),
+      insights_by_gender:    normalizeBreakdown(genderBd),
+      insights_by_placement: normalizeBreakdown(placementBd),
+      insights_by_country:   normalizeBreakdown(countryBd),
+      insights_by_device:    normalizeBreakdown(deviceBd),
+      insights_daily:        normalizeBreakdown(dailyBd),
+    };
+  }
+
+  const responseData = {
+    success: true,
+    date_preset: datePreset,
+    campaign: {
+      ...campaign,
+      insights: normalizeActions(campaignInsightResp?.data?.data),
+      ...breakdowns,
+      adsets: finalAdSets,
+    },
+  };
+
+  // Maximum (all-time) barely changes — cache for 2 hours; others 30 minutes
+  const ttl = datePreset === 'maximum' ? 2 * 60 * 60_000 : 30 * 60_000;
+  cacheSet(cacheKey, responseData, ttl);
+  res.json(responseData);
 };
 
 exports.updateCampaign = async (req, res) => {
