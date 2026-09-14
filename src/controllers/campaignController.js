@@ -303,7 +303,11 @@ exports.getCampaignDetails = async (req, res) => {
           ].join(','),
           limit: 100,
         },
-      }).catch(() => ({ data: { data: [] } })), // no adsets = empty array, not a crash
+      }).catch((err) => {
+        // Rate limit (code 17) must surface — don't silently swallow it
+        if (err.response?.data?.error?.code === 17) throw err;
+        return { data: { data: [] } };
+      }),
       // Aggregate insights
       axios.get(`${BASE}/${id}/insights`, { params: insightParams }).catch(() => null),
       // Breakdown by age
@@ -361,7 +365,10 @@ exports.getCampaignDetails = async (req, res) => {
               ].join(','),
               limit: 100,
             },
-          }).catch(() => ({ data: { data: [] } })), // no ads = empty array, not a crash
+          }).catch((err) => {
+            if (err.response?.data?.error?.code === 17) throw err;
+            return { data: { data: [] } };
+          }),
           axios.get(`${BASE}/${adset.id}/insights`, { params: insightParams }).catch(() => null),
         ])
       )

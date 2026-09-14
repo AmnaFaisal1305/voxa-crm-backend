@@ -25,8 +25,16 @@ exports.getAdSets = async (req, res) => {
   } catch (err) {
     console.error('Error fetching ad sets:', err.response?.data || err.message);
 
-    // When filtering by campaign, Meta may return an error for campaigns with
-    // no ad sets or limited token permissions — treat as empty, not a crash.
+    // Rate limit errors must surface so the frontend knows to retry later
+    if (err.response?.data?.error?.code === 17) {
+      return res.status(429).json({
+        success: false,
+        error: 'Meta API rate limit reached. Please wait a moment and try again.',
+      });
+    }
+
+    // For any other error when filtering by campaign (e.g. no ad sets, permissions),
+    // return empty rather than crashing — campaign simply has no ad sets yet.
     if (campaign_id) {
       return res.json({ success: true, adsets: [] });
     }
