@@ -238,7 +238,6 @@ exports.getCampaignDetails = async (req, res) => {
   const { id } = req.params;
   if (!id) return res.status(400).json({ success: false, error: 'Campaign ID is required.' });
 
-  // Valid Meta date presets. Map "lifetime" → "maximum" for convenience.
   const VALID_PRESETS = new Set([
     'today','yesterday','this_month','last_month','this_quarter',
     'maximum','data_maximum',
@@ -248,6 +247,9 @@ exports.getCampaignDetails = async (req, res) => {
   ]);
   const rawPreset = req.query.date_preset || 'last_30d';
   const datePreset = rawPreset === 'lifetime' ? 'maximum' : (VALID_PRESETS.has(rawPreset) ? rawPreset : 'last_30d');
+
+  // Breakdowns are expensive (6 extra API calls). Only fetch when explicitly requested.
+  const includeBreakdowns = req.query.include_breakdowns === 'true';
 
   try {
     const token = getToken();
@@ -260,18 +262,8 @@ exports.getCampaignDetails = async (req, res) => {
 
     const BREAKDOWN_FIELDS = 'spend,reach,impressions,clicks,ctr,cpm,cpc,actions,cost_per_action_type,action_values,date_start,date_stop';
 
-    // Fetch everything in parallel — config, adsets, aggregate insights, breakdowns, daily series
-    const [
-      campaignResp,
-      adSetsResp,
-      campaignInsightResp,
-      ageBreakdownResp,
-      genderBreakdownResp,
-      placementBreakdownResp,
-      countryBreakdownResp,
-      deviceBreakdownResp,
-      dailySeriesResp,
-    ] = await Promise.all([
+    // Core fetch: campaign config + adsets + aggregate insights (always)
+    const [campaignResp, adSetsResp, campaignInsightResp] = await Promise.all([
       axios.get(`${BASE}/${id}`, {
         params: {
           access_token: token,
@@ -284,7 +276,7 @@ exports.getCampaignDetails = async (req, res) => {
             'promoted_object', 'issues_info', 'adlabels', 'source_campaign_id',
           ].join(','),
         },
-      }).catch((err) => { throw err; }), // campaign must exist — let real errors surface
+      }),
       axios.get(`${BASE}/${id}/adsets`, {
         params: {
           access_token: token,
@@ -304,47 +296,61 @@ exports.getCampaignDetails = async (req, res) => {
           limit: 100,
         },
       }).catch((err) => {
-        // Rate limit (code 17) must surface — don't silently swallow it
         if (err.response?.data?.error?.code === 17) throw err;
         return { data: { data: [] } };
       }),
-      // Aggregate insights
       axios.get(`${BASE}/${id}/insights`, { params: insightParams }).catch(() => null),
-      // Breakdown by age
-      axios.get(`${BASE}/${id}/insights`, {
-        params: { ...insightParams, fields: BREAKDOWN_FIELDS, breakdowns: 'age' },
-      }).catch(() => null),
-      // Breakdown by gender
-      axios.get(`${BASE}/${id}/insights`, {
-        params: { ...insightParams, fields: BREAKDOWN_FIELDS, breakdowns: 'gender' },
-      }).catch(() => null),
-      // Breakdown by placement (platform + position)
-      axios.get(`${BASE}/${id}/insights`, {
-        params: { ...insightParams, fields: BREAKDOWN_FIELDS, breakdowns: 'publisher_platform,platform_position' },
-      }).catch(() => null),
-      // Breakdown by country
-      axios.get(`${BASE}/${id}/insights`, {
-        params: { ...insightParams, fields: BREAKDOWN_FIELDS, breakdowns: 'country' },
-      }).catch(() => null),
-      // Breakdown by device
-      axios.get(`${BASE}/${id}/insights`, {
-        params: { ...insightParams, fields: BREAKDOWN_FIELDS, breakdowns: 'impression_device' },
-      }).catch(() => null),
-      // Daily time series for charts (time_increment=1 means 1 row per day)
-      axios.get(`${BASE}/${id}/insights`, {
-        params: { ...insightParams, fields: BREAKDOWN_FIELDS, time_increment: 1 },
-      }).catch(() => null),
     ]);
 
     const campaign = campaignResp.data;
     const adSets = adSetsResp.data.data || [];
     const campaignInsights = normalizeActions(campaignInsightResp?.data?.data);
 
-    // Normalize breakdown rows (keep as array, normalize actions in each row)
     const normalizeBreakdown = (resp) => {
       const rows = resp?.data?.data || [];
       return rows.map((row) => normalizeActions([row]));
     };
+
+    // Breakdown + daily series — only when caller explicitly requests them
+    let breakdowns = {};
+    if (includeBreakdowns) {
+      const [
+        ageBreakdownResp,
+        genderBreakdownResp,
+        placementBreakdownResp,
+        countryBreakdownResp,
+        deviceBreakdownResp,
+        dailySeriesResp,
+      ] = await Promise.all([
+        axios.get(`${BASE}/${id}/insights`, {
+          params: { ...insightParams, fields: BREAKDOWN_FIELDS, breakdowns: 'age' },
+        }).catch(() => null),
+        axios.get(`${BASE}/${id}/insights`, {
+          params: { ...insightParams, fields: BREAKDOWN_FIELDS, breakdowns: 'gender' },
+        }).catch(() => null),
+        axios.get(`${BASE}/${id}/insights`, {
+          params: { ...insightParams, fields: BREAKDOWN_FIELDS, breakdowns: 'publisher_platform,platform_position' },
+        }).catch(() => null),
+        axios.get(`${BASE}/${id}/insights`, {
+          params: { ...insightParams, fields: BREAKDOWN_FIELDS, breakdowns: 'country' },
+        }).catch(() => null),
+        axios.get(`${BASE}/${id}/insights`, {
+          params: { ...insightParams, fields: BREAKDOWN_FIELDS, breakdowns: 'impression_device' },
+        }).catch(() => null),
+        axios.get(`${BASE}/${id}/insights`, {
+          params: { ...insightParams, fields: BREAKDOWN_FIELDS, time_increment: 1 },
+        }).catch(() => null),
+      ]);
+
+      breakdowns = {
+        insights_by_age:       normalizeBreakdown(ageBreakdownResp),
+        insights_by_gender:    normalizeBreakdown(genderBreakdownResp),
+        insights_by_placement: normalizeBreakdown(placementBreakdownResp),
+        insights_by_country:   normalizeBreakdown(countryBreakdownResp),
+        insights_by_device:    normalizeBreakdown(deviceBreakdownResp),
+        insights_daily:        normalizeBreakdown(dailySeriesResp),
+      };
+    }
 
     // Fetch ads + adset insights for every adset in parallel
     const adAndInsightResults = await Promise.allSettled(
@@ -374,7 +380,7 @@ exports.getCampaignDetails = async (req, res) => {
       )
     );
 
-    // Build adsets with their ads + insights, and fetch ad-level insights in parallel
+    // Build adsets with their ads + insights, then fetch ad-level insights in parallel
     const adInsightFetches = [];
     const adSetsWithAds = adSets.map((adset, i) => {
       const [adsResp, adsetInsightResp] = adAndInsightResults[i].status === 'fulfilled'
@@ -395,7 +401,6 @@ exports.getCampaignDetails = async (req, res) => {
 
     const adInsightResults = await Promise.allSettled(adInsightFetches);
 
-    // Attach ad-level insights back to each ad
     let insightIdx = 0;
     const finalAdSets = adSetsWithAds.map(({ adset, adsetInsights, ads }) => ({
       ...adset,
@@ -415,17 +420,18 @@ exports.getCampaignDetails = async (req, res) => {
       campaign: {
         ...campaign,
         insights: campaignInsights,
-        insights_by_age:       normalizeBreakdown(ageBreakdownResp),
-        insights_by_gender:    normalizeBreakdown(genderBreakdownResp),
-        insights_by_placement: normalizeBreakdown(placementBreakdownResp),
-        insights_by_country:   normalizeBreakdown(countryBreakdownResp),
-        insights_by_device:    normalizeBreakdown(deviceBreakdownResp),
-        insights_daily:        normalizeBreakdown(dailySeriesResp),
+        ...breakdowns,
         adsets: finalAdSets,
       },
     });
   } catch (err) {
     console.error('Error fetching campaign details:', err.response?.data || err.message);
+    if (err.response?.data?.error?.code === 17) {
+      return res.status(429).json({
+        success: false,
+        error: 'Meta API rate limit reached. Please wait a moment and try again.',
+      });
+    }
     res.status(500).json({
       success: false,
       error: err.response?.data?.error?.message || err.message,

@@ -159,6 +159,7 @@ Use this for the individual campaign detail page.
 ```
 GET /api/campaigns/120249381600010074
 GET /api/campaigns/120249381600010074?date_preset=last_7d
+GET /api/campaigns/120249381600010074?include_breakdowns=true
 ```
 
 **Query Params**
@@ -166,6 +167,11 @@ GET /api/campaigns/120249381600010074?date_preset=last_7d
 | Param | Default | Options |
 |---|---|---|
 | `date_preset` | `last_30d` | `today`, `yesterday`, `last_7d`, `last_14d`, `last_30d`, `last_90d`, `this_month`, `last_month`, `this_quarter`, `last_year`, `maximum` (all time) |
+| `include_breakdowns` | `false` | `true` to include age/gender/placement/country/device breakdowns + daily chart data |
+
+> **Important:** Breakdowns are opt-in because they fire 6 extra Meta API calls. Call the detail endpoint **without** `include_breakdowns` first to load the page fast (ad sets, ads, core insights). Only add `include_breakdowns=true` when the user navigates to a chart/breakdown tab. This prevents hitting Meta's rate limit.
+
+> **Rate limit (HTTP 429):** If you get `{ "success": false, "error": "Meta API rate limit reached..." }`, wait 5–10 minutes before retrying. This is a Meta-side limit, not a server error.
 
 **Response — 200**
 ```json
