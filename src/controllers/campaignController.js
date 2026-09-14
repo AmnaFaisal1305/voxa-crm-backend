@@ -29,6 +29,32 @@ function isRateLimit(err) {
   return err?.response?.data?.error?.code === 17;
 }
 
+// Per-ad-account rate limit cooldown — 5 minutes once an account hits code 17.
+// Prevents hammering a rate-limited account and making things worse.
+const _rateLimitedAccounts = new Map(); // accountId → expiresAt
+
+function isAccountCoolingDown(accountId) {
+  if (!accountId) return false;
+  const exp = _rateLimitedAccounts.get(accountId);
+  if (!exp) return false;
+  if (Date.now() > exp) { _rateLimitedAccounts.delete(accountId); return false; }
+  return true;
+}
+
+function markAccountRateLimited(accountId, cooldownMs = 5 * 60_000) {
+  if (accountId) _rateLimitedAccounts.set(accountId, Date.now() + cooldownMs);
+}
+
+// Look up a campaign's ad_account_id from any cached list response
+function getAccountIdFromCache(campaignId) {
+  for (const [key, entry] of _cache.entries()) {
+    if (!key.startsWith('list:') || Date.now() > entry.expiresAt) continue;
+    const c = entry.data?.campaigns?.find((x) => x.id === campaignId);
+    if (c?.ad_account_id) return c.ad_account_id;
+  }
+  return null;
+}
+
 // Run Promise.all in chunks to avoid spiking Meta's rate limit
 async function batchedAllSettled(items, batchSize = 3, delayMs = 300) {
   const results = [];
@@ -43,17 +69,15 @@ async function batchedAllSettled(items, batchSize = 3, delayMs = 300) {
   return results;
 }
 
-// Exponential-backoff retry on Meta rate limit (code 17).
-// Waits 2s → 4s → 8s before giving up (total up to ~14s of patience).
-async function withRateLimitRetry(fn, maxRetries = 3, baseDelayMs = 2000) {
+// Single retry after a fixed delay on rate limit. Fast-fail — no exponential waits.
+async function withRateLimitRetry(fn, maxRetries = 1, retryDelayMs = 3000) {
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       return await fn();
     } catch (err) {
       if (!isRateLimit(err) || attempt === maxRetries) throw err;
-      const delay = baseDelayMs * Math.pow(2, attempt); // 2s, 4s, 8s
-      console.log(`Meta rate limit — retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`);
-      await new Promise((r) => setTimeout(r, delay));
+      console.log(`Meta rate limit — retrying in ${retryDelayMs}ms`);
+      await new Promise((r) => setTimeout(r, retryDelayMs));
     }
   }
 }
@@ -147,20 +171,27 @@ exports.getCampaigns = async (req, res) => {
       })
     );
 
-    // Fetch insights in batches of 3 (not all-parallel) to avoid exhausting rate limits
+    // Fetch insights in batches of 3 — skip campaigns whose account is already cooling down
     const insightResults = await batchedAllSettled(
-      allCampaigns.map((c) =>
-        axios.get(`${BASE}/${c.id}/insights`, {
-          params: {
-            access_token: token,
-            fields: LIST_INSIGHT_FIELDS,
-            date_preset: datePreset,
-          },
-        })
-      ),
-      3,  // 3 at a time
-      300 // 300ms between batches
+      allCampaigns.map((c) => {
+        if (isAccountCoolingDown(c.ad_account_id)) {
+          return Promise.reject(new Error('account_cooldown'));
+        }
+        return axios.get(`${BASE}/${c.id}/insights`, {
+          params: { access_token: token, fields: LIST_INSIGHT_FIELDS, date_preset: datePreset },
+        });
+      }),
+      3,   // 3 at a time
+      300  // 300ms between batches
     );
+
+    // Mark accounts that got rate-limited during the insight batch
+    allCampaigns.forEach((c, i) => {
+      const r = insightResults[i];
+      if (r.status === 'rejected' && isRateLimit(r.reason)) {
+        markAccountRateLimited(c.ad_account_id);
+      }
+    });
 
     // Attach insights to each campaign
     const toMap = (arr) => {
@@ -345,38 +376,53 @@ exports.getCampaignDetails = async (req, res) => {
     'adlabels', 'instagram_actor_id', 'source_adset_id',
   ].join(',');
 
-  // ── CRITICAL PATH: campaign config + adsets (2 calls) ────────────────────
-  // One retry after 3 seconds if rate-limited. If still failing, fall back to
-  // whatever is in the list cache so the page shows something instead of an error.
+  // ── ACCOUNT COOLDOWN CHECK ───────────────────────────────────────────────
+  // If this campaign's ad account recently hit a rate limit, serve from cache
+  // rather than immediately hammering Meta again.
+  const accountId = getAccountIdFromCache(id);
+  if (isAccountCoolingDown(accountId)) {
+    const listCached = cacheGet(`list:${datePreset}`);
+    const fromList = listCached?.campaigns?.find((c) => c.id === id);
+    if (fromList) {
+      return res.json({
+        success: true,
+        date_preset: datePreset,
+        _degraded: true,
+        _degraded_reason: 'Meta rate limit cooling down — full data will be available shortly',
+        campaign: { ...fromList, adsets: [] },
+      });
+    }
+    return res.json(RATE_LIMIT_RESPONSE);
+  }
+
+  // ── CRITICAL PATH: 1 Meta call (campaign + adsets via field expansion) ───
+  // Combining these into one call halves the Meta API cost per detail load.
   let campaign, adSets;
   try {
-    const [campaignResp, adSetsResp] = await withRateLimitRetry(
-      () => Promise.all([
-        axios.get(`${BASE}/${id}`, {
-          params: {
-            access_token: token,
-            fields: [
-              'id', 'name', 'objective', 'status', 'effective_status', 'configured_status',
-              'daily_budget', 'lifetime_budget', 'budget_remaining', 'spend_cap',
-              'bid_strategy', 'buying_type', 'pacing_type',
-              'start_time', 'stop_time', 'created_time', 'updated_time',
-              'special_ad_categories', 'special_ad_category_country',
-              'promoted_object', 'issues_info', 'adlabels', 'source_campaign_id',
-            ].join(','),
-          },
-        }),
-        axios.get(`${BASE}/${id}/adsets`, {
-          params: { access_token: token, fields: ADSET_FIELDS, limit: 100 },
-        }).catch((err) => { if (isRateLimit(err)) throw err; return { data: { data: [] } }; }),
-      ]),
-      1,    // max 1 retry
-      3000  // 3 seconds before retry
+    const campaignResp = await withRateLimitRetry(
+      () => axios.get(`${BASE}/${id}`, {
+        params: {
+          access_token: token,
+          fields: [
+            'id', 'name', 'objective', 'status', 'effective_status', 'configured_status',
+            'daily_budget', 'lifetime_budget', 'budget_remaining', 'spend_cap',
+            'bid_strategy', 'buying_type', 'pacing_type',
+            'start_time', 'stop_time', 'created_time', 'updated_time',
+            'special_ad_categories', 'special_ad_category_country',
+            'promoted_object', 'issues_info', 'adlabels', 'source_campaign_id',
+            `adsets.limit(100){${ADSET_FIELDS}}`,
+          ].join(','),
+        },
+      }),
+      1,    // 1 retry
+      3000  // after 3 seconds
     );
-    campaign = campaignResp.data;
-    adSets = adSetsResp.data.data || [];
+    campaign = { ...campaignResp.data };
+    adSets = campaign.adsets?.data || [];
+    delete campaign.adsets; // keep campaign clean; adsets go into finalAdSets below
   } catch (err) {
     if (isRateLimit(err)) {
-      // Serve from list cache so the page isn't blank — adsets will be empty
+      markAccountRateLimited(accountId);
       const listCached = cacheGet(`list:${datePreset}`);
       const fromList = listCached?.campaigns?.find((c) => c.id === id);
       if (fromList) {
@@ -394,21 +440,23 @@ exports.getCampaignDetails = async (req, res) => {
   }
 
   // ── OPTIONAL PATH: ads + insights (fail silently — never blocks the page) ─
-  // 500ms gap before the second burst so the critical calls' window can recover.
+  // 500ms gap before the second burst.
   await new Promise((r) => setTimeout(r, 500));
 
-  const [allAdsResp, campaignInsightResp, adsetInsightResp, adInsightResp] = await Promise.all([
-    axios.get(`${BASE}/${id}/ads`, {
-      params: { access_token: token, fields: AD_FIELDS, limit: 200 },
-    }).catch(() => null),
-    axios.get(`${BASE}/${id}/insights`, { params: insightParams }).catch(() => null),
-    axios.get(`${BASE}/${id}/insights`, {
-      params: { ...insightParams, level: 'adset' },
-    }).catch(() => null),
-    axios.get(`${BASE}/${id}/insights`, {
-      params: { ...insightParams, level: 'ad' },
-    }).catch(() => null),
+  const optionalResults = await Promise.allSettled([
+    axios.get(`${BASE}/${id}/ads`, { params: { access_token: token, fields: AD_FIELDS, limit: 200 } }),
+    axios.get(`${BASE}/${id}/insights`, { params: insightParams }),
+    axios.get(`${BASE}/${id}/insights`, { params: { ...insightParams, level: 'adset' } }),
+    axios.get(`${BASE}/${id}/insights`, { params: { ...insightParams, level: 'ad' } }),
   ]);
+
+  // If any optional call rate-limited, mark the account so future detail loads go to cache
+  if (optionalResults.some((r) => r.status === 'rejected' && isRateLimit(r.reason))) {
+    markAccountRateLimited(accountId);
+  }
+
+  const [allAdsResp, campaignInsightResp, adsetInsightResp, adInsightResp] =
+    optionalResults.map((r) => (r.status === 'fulfilled' ? r.value : null));
 
   const allAds = allAdsResp?.data?.data || [];
 
