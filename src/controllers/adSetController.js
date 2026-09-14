@@ -25,11 +25,12 @@ exports.getAdSets = async (req, res) => {
   } catch (err) {
     console.error('Error fetching ad sets:', err.response?.data || err.message);
 
-    // Rate limit errors must surface so the frontend knows to retry later
+    // Rate limit — return 200 so frontend treats it as a soft error, not a crash
     if (err.response?.data?.error?.code === 17) {
-      return res.status(429).json({
+      return res.json({
         success: false,
-        error: 'Meta API rate limit reached. Please wait a moment and try again.',
+        error: 'rate_limit',
+        message: 'Meta API rate limit reached. Please wait a moment and try again.',
       });
     }
 

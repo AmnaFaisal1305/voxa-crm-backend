@@ -5,6 +5,26 @@ const BASE = 'https://graph.facebook.com/v25.0';
 const getToken = () => process.env.META_USER_ACCESS_TOKEN;
 const getAdAccount = () => process.env.META_AD_ACCOUNT_ID;
 
+// In-memory cache — prevents hammering Meta when the frontend re-renders or polls
+const _cache = new Map();
+
+function cacheGet(key) {
+  const entry = _cache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) { _cache.delete(key); return null; }
+  return entry.data;
+}
+
+function cacheSet(key, data, ttlMs) {
+  _cache.set(key, { data, expiresAt: Date.now() + ttlMs });
+}
+
+const RATE_LIMIT_RESPONSE = {
+  success: false,
+  error: 'rate_limit',
+  message: 'Meta API rate limit reached. Please wait a moment and try again.',
+};
+
 exports.getCampaigns = async (req, res) => {
   try {
     const token = getToken();
@@ -18,6 +38,10 @@ exports.getCampaigns = async (req, res) => {
     ]);
     const rawPreset = req.query.date_preset || 'last_30d';
     const datePreset = rawPreset === 'lifetime' ? 'maximum' : (VALID_PRESETS.has(rawPreset) ? rawPreset : 'last_30d');
+
+    const cacheKey = `list:${datePreset}`;
+    const cached = cacheGet(cacheKey);
+    if (cached) return res.json(cached);
 
     const CAMPAIGN_FIELDS = [
       'id', 'name', 'objective', 'status', 'effective_status', 'configured_status',
@@ -127,9 +151,12 @@ exports.getCampaigns = async (req, res) => {
       };
     });
 
-    res.json({ success: true, date_preset: datePreset, campaigns: campaignsWithInsights, accounts });
+    const responseData = { success: true, date_preset: datePreset, campaigns: campaignsWithInsights, accounts };
+    cacheSet(cacheKey, responseData, 30_000); // 30-second cache on the list
+    res.json(responseData);
   } catch (err) {
     console.error('Error fetching campaigns:', err.response?.data || err.message);
+    if (err.response?.data?.error?.code === 17) return res.json(RATE_LIMIT_RESPONSE);
     res.status(500).json({
       success: false,
       error: err.response?.data?.error?.message || err.message,
@@ -250,6 +277,10 @@ exports.getCampaignDetails = async (req, res) => {
 
   // Breakdowns are expensive (6 extra API calls). Only fetch when explicitly requested.
   const includeBreakdowns = req.query.include_breakdowns === 'true';
+
+  const cacheKey = `detail:${id}:${datePreset}:${includeBreakdowns}`;
+  const cached = cacheGet(cacheKey);
+  if (cached) return res.json(cached);
 
   try {
     const token = getToken();
@@ -414,7 +445,7 @@ exports.getCampaignDetails = async (req, res) => {
       }),
     }));
 
-    res.json({
+    const responseData = {
       success: true,
       date_preset: datePreset,
       campaign: {
@@ -423,15 +454,12 @@ exports.getCampaignDetails = async (req, res) => {
         ...breakdowns,
         adsets: finalAdSets,
       },
-    });
+    };
+    cacheSet(cacheKey, responseData, 60_000); // 60-second cache on campaign detail
+    res.json(responseData);
   } catch (err) {
     console.error('Error fetching campaign details:', err.response?.data || err.message);
-    if (err.response?.data?.error?.code === 17) {
-      return res.status(429).json({
-        success: false,
-        error: 'Meta API rate limit reached. Please wait a moment and try again.',
-      });
-    }
+    if (err.response?.data?.error?.code === 17) return res.json(RATE_LIMIT_RESPONSE);
     res.status(500).json({
       success: false,
       error: err.response?.data?.error?.message || err.message,
