@@ -96,9 +96,9 @@ GET /api/campaigns
 | `daily_budget` | Daily spend limit in cents — divide by 100 for display |
 | `budget_remaining` | How much budget is left today in cents |
 | `ad_account_id` | Which ad account this campaign belongs to |
-| `ad_account_name` | Human-readable ad account name |
-| `page_id` | Facebook Page ID this campaign is linked to (if available) |
-| `page_name` | Facebook Page name — ready to display |
+| `ad_account_name` | Human-readable ad account name — always present |
+| `page_id` | Facebook Page ID this campaign is linked to |
+| `page_name` | Facebook Page name — ready to display. Resolved from ad set level if not available at campaign level. Will be `null` for campaigns that don't use a page (e.g. `OUTCOME_SALES` running on pixel/website conversions) |
 
 ---
 
