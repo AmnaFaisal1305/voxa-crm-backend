@@ -8,6 +8,17 @@ const getAdAccount = () => process.env.META_AD_ACCOUNT_ID;
 exports.getCampaigns = async (req, res) => {
   try {
     const token = getToken();
+
+    const VALID_PRESETS = new Set([
+      'today','yesterday','this_month','last_month','this_quarter',
+      'maximum','data_maximum',
+      'last_3d','last_7d','last_14d','last_28d','last_30d','last_90d',
+      'last_week_mon_sun','last_week_sun_sat','last_quarter','last_year',
+      'this_week_mon_today','this_week_sun_today','this_year',
+    ]);
+    const rawPreset = req.query.date_preset || 'last_30d';
+    const datePreset = rawPreset === 'lifetime' ? 'maximum' : (VALID_PRESETS.has(rawPreset) ? rawPreset : 'last_30d');
+
     const CAMPAIGN_FIELDS = [
       'id', 'name', 'objective', 'status', 'effective_status', 'configured_status',
       'daily_budget', 'lifetime_budget', 'budget_remaining', 'spend_cap',
@@ -18,7 +29,13 @@ exports.getCampaigns = async (req, res) => {
       'adsets{promoted_object}',
     ].join(',');
 
-    // Fetch all ad accounts and all managed pages in parallel
+    const LIST_INSIGHT_FIELDS = [
+      'spend', 'reach', 'impressions', 'clicks', 'ctr', 'cpm', 'cpc', 'cpp', 'frequency',
+      'actions', 'cost_per_action_type', 'action_values',
+      'date_start', 'date_stop',
+    ].join(',');
+
+    // Fetch all ad accounts and managed pages in parallel
     const [accountsResp, pagesResp] = await Promise.all([
       axios.get(`${BASE}/me/adaccounts`, {
         params: { access_token: token, fields: 'id,name', limit: 100 },
@@ -30,7 +47,7 @@ exports.getCampaigns = async (req, res) => {
 
     const adAccounts = accountsResp.data.data || [];
 
-    // Build a page_id → page_name lookup map
+    // Build page_id → page_name lookup
     const pageMap = {};
     for (const page of (pagesResp.data.data || [])) {
       pageMap[page.id] = page.name;
@@ -54,15 +71,14 @@ exports.getCampaigns = async (req, res) => {
       .filter((r) => r.status === 'fulfilled')
       .map((r) => r.value);
 
+    // Flatten campaigns and resolve page info
     const allCampaigns = accounts.flatMap((a) =>
       a.campaigns.map((c) => {
-        // Try campaign-level promoted_object first, fall back to first adset that has a page_id
         const campaignPageId = c.promoted_object?.page_id || null;
         const adsetPageId = (c.adsets?.data || [])
           .map((as) => as.promoted_object?.page_id)
           .find(Boolean) || null;
         const pageId = campaignPageId || adsetPageId;
-
         const { adsets: _adsets, ...campaignData } = c;
         return {
           ...campaignData,
@@ -74,7 +90,44 @@ exports.getCampaigns = async (req, res) => {
       })
     );
 
-    res.json({ success: true, campaigns: allCampaigns, accounts });
+    // Fetch insights for every campaign in parallel
+    const insightResults = await Promise.allSettled(
+      allCampaigns.map((c) =>
+        axios.get(`${BASE}/${c.id}/insights`, {
+          params: {
+            access_token: token,
+            fields: LIST_INSIGHT_FIELDS,
+            date_preset: datePreset,
+          },
+        })
+      )
+    );
+
+    // Attach insights to each campaign
+    const toMap = (arr) => {
+      if (!Array.isArray(arr)) return {};
+      return arr.reduce((acc, item) => { acc[item.action_type] = item.value; return acc; }, {});
+    };
+
+    const campaignsWithInsights = allCampaigns.map((c, i) => {
+      const raw = insightResults[i].status === 'fulfilled'
+        ? insightResults[i].value?.data?.data?.[0] || null
+        : null;
+
+      if (!raw) return { ...c, insights: null };
+
+      return {
+        ...c,
+        insights: {
+          ...raw,
+          actions:              toMap(raw.actions),
+          cost_per_action_type: toMap(raw.cost_per_action_type),
+          action_values:        toMap(raw.action_values),
+        },
+      };
+    });
+
+    res.json({ success: true, date_preset: datePreset, campaigns: campaignsWithInsights, accounts });
   } catch (err) {
     console.error('Error fetching campaigns:', err.response?.data || err.message);
     res.status(500).json({
