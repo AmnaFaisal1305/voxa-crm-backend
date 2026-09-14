@@ -324,9 +324,33 @@ exports.getCampaignDetails = async (req, res) => {
 
     const BREAKDOWN_FIELDS = 'spend,reach,impressions,clicks,ctr,cpm,cpc,actions,cost_per_action_type,action_values,date_start,date_stop';
 
-    // Core fetch: campaign config + adsets + aggregate insights.
-    // Wrapped in withRateLimitRetry so a transient rate limit gets one automatic retry.
-    const [campaignResp, adSetsResp, campaignInsightResp] = await withRateLimitRetry(() =>
+    const AD_FIELDS = [
+      'id', 'name', 'adset_id', 'campaign_id',
+      'status', 'effective_status', 'configured_status',
+      'creative{id,name,title,body,image_url,thumbnail_url,object_story_spec,call_to_action_type,link_url}',
+      'bid_amount', 'bid_type', 'bid_info',
+      'tracking_specs', 'conversion_specs',
+      'review_feedback', 'issues_info',
+      'preview_shareable_link',
+      'created_time', 'updated_time',
+    ].join(',');
+
+    const ADSET_FIELDS = [
+      'id', 'name', 'campaign_id', 'status', 'effective_status', 'configured_status',
+      'daily_budget', 'lifetime_budget', 'budget_remaining',
+      'daily_min_spend_target', 'daily_spend_cap', 'lifetime_min_spend_target', 'lifetime_spend_cap',
+      'bid_amount', 'bid_strategy', 'bid_constraints', 'pacing_type',
+      'optimization_goal', 'optimization_sub_event', 'billing_event',
+      'destination_type', 'promoted_object',
+      'targeting', 'targeting_optimization_types',
+      'frequency_control_specs', 'attribution_spec',
+      'start_time', 'end_time', 'created_time', 'updated_time',
+      'is_dynamic_creative', 'learning_stage_info', 'issues_info',
+      'adlabels', 'instagram_actor_id', 'source_adset_id',
+    ].join(',');
+
+    // Batch 1 — config: campaign + adsets + all ads (3 calls, no insights yet)
+    const [campaignResp, adSetsResp, allAdsResp] = await withRateLimitRetry(() =>
       Promise.all([
         axios.get(`${BASE}/${id}`, {
           params: {
@@ -342,43 +366,71 @@ exports.getCampaignDetails = async (req, res) => {
           },
         }),
         axios.get(`${BASE}/${id}/adsets`, {
-          params: {
-            access_token: token,
-            fields: [
-              'id', 'name', 'campaign_id', 'status', 'effective_status', 'configured_status',
-              'daily_budget', 'lifetime_budget', 'budget_remaining',
-              'daily_min_spend_target', 'daily_spend_cap', 'lifetime_min_spend_target', 'lifetime_spend_cap',
-              'bid_amount', 'bid_strategy', 'bid_constraints', 'pacing_type',
-              'optimization_goal', 'optimization_sub_event', 'billing_event',
-              'destination_type', 'promoted_object',
-              'targeting', 'targeting_optimization_types',
-              'frequency_control_specs', 'attribution_spec',
-              'start_time', 'end_time', 'created_time', 'updated_time',
-              'is_dynamic_creative', 'learning_stage_info', 'issues_info',
-              'adlabels', 'instagram_actor_id', 'source_adset_id',
-            ].join(','),
-            limit: 100,
-          },
-        }).catch((err) => {
-          if (isRateLimit(err)) throw err; // let retry handle it
-          return { data: { data: [] } };
-        }),
-        axios.get(`${BASE}/${id}/insights`, { params: insightParams }).catch(() => null),
+          params: { access_token: token, fields: ADSET_FIELDS, limit: 100 },
+        }).catch((err) => { if (isRateLimit(err)) throw err; return { data: { data: [] } }; }),
+        axios.get(`${BASE}/${id}/ads`, {
+          params: { access_token: token, fields: AD_FIELDS, limit: 200 },
+        }).catch((err) => { if (isRateLimit(err)) throw err; return { data: { data: [] } }; }),
       ])
     );
 
     const campaign = campaignResp.data;
     const adSets = adSetsResp.data.data || [];
-    const campaignInsights = normalizeActions(campaignInsightResp?.data?.data);
+    const allAds = allAdsResp.data.data || [];
+
+    // Small gap before insight calls so the first batch's budget window resets slightly
+    await new Promise((r) => setTimeout(r, 400));
+
+    // Batch 2 — insights: 3 calls total regardless of how many adsets/ads there are.
+    // level=adset and level=ad return one row per entity, matched by id afterward.
+    const [campaignInsightResp, adsetInsightResp, adInsightResp] = await withRateLimitRetry(() =>
+      Promise.all([
+        axios.get(`${BASE}/${id}/insights`, { params: insightParams }).catch(() => null),
+        axios.get(`${BASE}/${id}/insights`, {
+          params: { ...insightParams, level: 'adset' },
+        }).catch(() => null),
+        axios.get(`${BASE}/${id}/insights`, {
+          params: { ...insightParams, level: 'ad' },
+        }).catch(() => null),
+      ])
+    );
+
+    // Build lookup maps: id → normalised insight row
+    const adsetInsightMap = {};
+    for (const row of (adsetInsightResp?.data?.data || [])) {
+      adsetInsightMap[row.adset_id] = normalizeActions([row]);
+    }
+    const adInsightMap = {};
+    for (const row of (adInsightResp?.data?.data || [])) {
+      adInsightMap[row.ad_id] = normalizeActions([row]);
+    }
+
+    // Group ads by adset_id
+    const adsByAdset = {};
+    for (const ad of allAds) {
+      if (!adsByAdset[ad.adset_id]) adsByAdset[ad.adset_id] = [];
+      adsByAdset[ad.adset_id].push(ad);
+    }
+
+    const finalAdSets = adSets.map((adset) => ({
+      ...adset,
+      insights: adsetInsightMap[adset.id] || null,
+      ads: (adsByAdset[adset.id] || []).map((ad) => ({
+        ...ad,
+        insights: adInsightMap[ad.id] || null,
+      })),
+    }));
 
     const normalizeBreakdown = (resp) => {
       const rows = resp?.data?.data || [];
       return rows.map((row) => normalizeActions([row]));
     };
 
-    // Breakdown + daily series — only when caller explicitly requests them
+    // Breakdowns — only when caller explicitly requests them (6 extra calls)
     let breakdowns = {};
     if (includeBreakdowns) {
+      await new Promise((r) => setTimeout(r, 400)); // gap before breakdown burst
+
       const [
         ageBreakdownResp,
         genderBreakdownResp,
@@ -417,74 +469,12 @@ exports.getCampaignDetails = async (req, res) => {
       };
     }
 
-    // Fetch ads + adset insights for every adset in parallel
-    const adAndInsightResults = await Promise.allSettled(
-      adSets.map((adset) =>
-        Promise.all([
-          axios.get(`${BASE}/${adset.id}/ads`, {
-            params: {
-              access_token: token,
-              fields: [
-                'id', 'name', 'adset_id', 'campaign_id',
-                'status', 'effective_status', 'configured_status',
-                'creative{id,name,title,body,image_url,thumbnail_url,object_story_spec,call_to_action_type,link_url}',
-                'bid_amount', 'bid_type', 'bid_info',
-                'tracking_specs', 'conversion_specs',
-                'review_feedback', 'issues_info',
-                'preview_shareable_link',
-                'created_time', 'updated_time',
-              ].join(','),
-              limit: 100,
-            },
-          }).catch((err) => {
-            if (err.response?.data?.error?.code === 17) throw err;
-            return { data: { data: [] } };
-          }),
-          axios.get(`${BASE}/${adset.id}/insights`, { params: insightParams }).catch(() => null),
-        ])
-      )
-    );
-
-    // Build adsets with their ads + insights, then fetch ad-level insights in parallel
-    const adInsightFetches = [];
-    const adSetsWithAds = adSets.map((adset, i) => {
-      const [adsResp, adsetInsightResp] = adAndInsightResults[i].status === 'fulfilled'
-        ? adAndInsightResults[i].value
-        : [null, null];
-
-      const ads = adsResp?.data?.data || [];
-      const adsetInsights = normalizeActions(adsetInsightResp?.data?.data);
-
-      ads.forEach((ad) => {
-        adInsightFetches.push(
-          axios.get(`${BASE}/${ad.id}/insights`, { params: insightParams }).catch(() => null)
-        );
-      });
-
-      return { adset, adsetInsights, ads };
-    });
-
-    const adInsightResults = await Promise.allSettled(adInsightFetches);
-
-    let insightIdx = 0;
-    const finalAdSets = adSetsWithAds.map(({ adset, adsetInsights, ads }) => ({
-      ...adset,
-      insights: adsetInsights,
-      ads: ads.map((ad) => {
-        const insightResp = adInsightResults[insightIdx++];
-        const adInsights = normalizeActions(
-          insightResp?.status === 'fulfilled' ? insightResp.value?.data?.data : null
-        );
-        return { ...ad, insights: adInsights };
-      }),
-    }));
-
     const responseData = {
       success: true,
       date_preset: datePreset,
       campaign: {
         ...campaign,
-        insights: campaignInsights,
+        insights: normalizeActions(campaignInsightResp?.data?.data),
         ...breakdowns,
         adsets: finalAdSets,
       },
