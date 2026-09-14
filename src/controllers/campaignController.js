@@ -29,8 +29,10 @@ function isRateLimit(err) {
   return err?.response?.data?.error?.code === 17;
 }
 
-// Per-ad-account rate limit cooldown — 5 minutes once an account hits code 17.
-// Prevents hammering a rate-limited account and making things worse.
+// Per-ad-account rate limit cooldown.
+// Two triggers:
+//   1. Reactive  — Meta returns error code 17 → 5-min cooldown
+//   2. Proactive — x-fb-ads-insights-throttle header shows ≥80% utilisation → shorter cooldown
 const _rateLimitedAccounts = new Map(); // accountId → expiresAt
 
 function isAccountCoolingDown(accountId) {
@@ -43,6 +45,27 @@ function isAccountCoolingDown(accountId) {
 
 function markAccountRateLimited(accountId, cooldownMs = 5 * 60_000) {
   if (accountId) _rateLimitedAccounts.set(accountId, Date.now() + cooldownMs);
+}
+
+// Read Meta's official throttle header from an axios response.
+// x-fb-ads-insights-throttle: {"app_id_util_pct":7,"acc_id_util_pct":47,"ads_api_access_tier":"standard_access"}
+// acc_id_util_pct tells us how close this specific ad account is to its limit.
+function checkThrottleHeader(axiosResponse, accountId) {
+  if (!axiosResponse || !accountId) return;
+  try {
+    const raw = axiosResponse.headers?.['x-fb-ads-insights-throttle'];
+    if (!raw) return;
+    const { acc_id_util_pct: pct } = JSON.parse(raw);
+    if (pct >= 95) {
+      // Almost at the wall — 5-min cooldown before we get error code 17
+      markAccountRateLimited(accountId, 5 * 60_000);
+      console.log(`[throttle] ${accountId} at ${pct}% — 5-min cooldown`);
+    } else if (pct >= 80) {
+      // High but not critical — 90-second breather
+      markAccountRateLimited(accountId, 90_000);
+      console.log(`[throttle] ${accountId} at ${pct}% — 90s cooldown`);
+    }
+  } catch { /* ignore malformed header */ }
 }
 
 // Look up a campaign's ad_account_id from any cached list response
@@ -185,10 +208,12 @@ exports.getCampaigns = async (req, res) => {
       300  // 300ms between batches
     );
 
-    // Mark accounts that got rate-limited during the insight batch
+    // Check throttle headers + mark rate-limited accounts from the insight batch
     allCampaigns.forEach((c, i) => {
       const r = insightResults[i];
-      if (r.status === 'rejected' && isRateLimit(r.reason)) {
+      if (r.status === 'fulfilled') {
+        checkThrottleHeader(r.value, c.ad_account_id);
+      } else if (r.status === 'rejected' && isRateLimit(r.reason)) {
         markAccountRateLimited(c.ad_account_id);
       }
     });
@@ -450,13 +475,18 @@ exports.getCampaignDetails = async (req, res) => {
     axios.get(`${BASE}/${id}/insights`, { params: { ...insightParams, level: 'ad' } }),
   ]);
 
-  // If any optional call rate-limited, mark the account so future detail loads go to cache
+  // Mark account if any call rate-limited (reactive)
   if (optionalResults.some((r) => r.status === 'rejected' && isRateLimit(r.reason))) {
     markAccountRateLimited(accountId);
   }
 
   const [allAdsResp, campaignInsightResp, adsetInsightResp, adInsightResp] =
     optionalResults.map((r) => (r.status === 'fulfilled' ? r.value : null));
+
+  // Check throttle headers on insight responses (proactive — catches 80-95% before code 17)
+  checkThrottleHeader(campaignInsightResp, accountId);
+  checkThrottleHeader(adsetInsightResp, accountId);
+  checkThrottleHeader(adInsightResp, accountId);
 
   const allAds = allAdsResp?.data?.data || [];
 
