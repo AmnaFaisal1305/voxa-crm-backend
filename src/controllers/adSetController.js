@@ -6,9 +6,9 @@ const getAdAccount = () => process.env.META_AD_ACCOUNT_ID;
 const getPageId = () => process.env.META_PAGE_ID;
 
 exports.getAdSets = async (req, res) => {
-  try {
-    const { campaign_id } = req.query;
+  const { campaign_id } = req.query;
 
+  try {
     const url = campaign_id
       ? `${BASE}/${campaign_id}/adsets`
       : `${BASE}/${getAdAccount()}/adsets`;
@@ -24,6 +24,13 @@ exports.getAdSets = async (req, res) => {
     res.json({ success: true, adsets: data.data || [] });
   } catch (err) {
     console.error('Error fetching ad sets:', err.response?.data || err.message);
+
+    // When filtering by campaign, Meta may return an error for campaigns with
+    // no ad sets or limited token permissions — treat as empty, not a crash.
+    if (campaign_id) {
+      return res.json({ success: true, adsets: [] });
+    }
+
     res.status(500).json({
       success: false,
       error: err.response?.data?.error?.message || err.message,
