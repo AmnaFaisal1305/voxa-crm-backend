@@ -284,7 +284,7 @@ exports.getCampaignDetails = async (req, res) => {
             'promoted_object', 'issues_info', 'adlabels', 'source_campaign_id',
           ].join(','),
         },
-      }),
+      }).catch((err) => { throw err; }), // campaign must exist — let real errors surface
       axios.get(`${BASE}/${id}/adsets`, {
         params: {
           access_token: token,
@@ -303,7 +303,7 @@ exports.getCampaignDetails = async (req, res) => {
           ].join(','),
           limit: 100,
         },
-      }),
+      }).catch(() => ({ data: { data: [] } })), // no adsets = empty array, not a crash
       // Aggregate insights
       axios.get(`${BASE}/${id}/insights`, { params: insightParams }).catch(() => null),
       // Breakdown by age
@@ -361,7 +361,7 @@ exports.getCampaignDetails = async (req, res) => {
               ].join(','),
               limit: 100,
             },
-          }),
+          }).catch(() => ({ data: { data: [] } })), // no ads = empty array, not a crash
           axios.get(`${BASE}/${adset.id}/insights`, { params: insightParams }).catch(() => null),
         ])
       )
