@@ -25,6 +25,35 @@ const RATE_LIMIT_RESPONSE = {
   message: 'Meta API rate limit reached. Please wait a moment and try again.',
 };
 
+function isRateLimit(err) {
+  return err?.response?.data?.error?.code === 17;
+}
+
+// Run Promise.all in chunks to avoid spiking Meta's rate limit
+async function batchedAllSettled(items, batchSize = 3, delayMs = 300) {
+  const results = [];
+  for (let i = 0; i < items.length; i += batchSize) {
+    const batch = items.slice(i, i + batchSize);
+    const batchResults = await Promise.allSettled(batch);
+    results.push(...batchResults);
+    if (i + batchSize < items.length) {
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+  return results;
+}
+
+// Retry a single async call once after a delay if it rate-limits
+async function withRateLimitRetry(fn, retryDelayMs = 1500) {
+  try {
+    return await fn();
+  } catch (err) {
+    if (!isRateLimit(err)) throw err;
+    await new Promise((r) => setTimeout(r, retryDelayMs));
+    return await fn(); // throws again if still limited — caller handles it
+  }
+}
+
 exports.getCampaigns = async (req, res) => {
   try {
     const token = getToken();
@@ -114,8 +143,8 @@ exports.getCampaigns = async (req, res) => {
       })
     );
 
-    // Fetch insights for every campaign in parallel
-    const insightResults = await Promise.allSettled(
+    // Fetch insights in batches of 3 (not all-parallel) to avoid exhausting rate limits
+    const insightResults = await batchedAllSettled(
       allCampaigns.map((c) =>
         axios.get(`${BASE}/${c.id}/insights`, {
           params: {
@@ -124,7 +153,9 @@ exports.getCampaigns = async (req, res) => {
             date_preset: datePreset,
           },
         })
-      )
+      ),
+      3,  // 3 at a time
+      300 // 300ms between batches
     );
 
     // Attach insights to each campaign
@@ -152,7 +183,7 @@ exports.getCampaigns = async (req, res) => {
     });
 
     const responseData = { success: true, date_preset: datePreset, campaigns: campaignsWithInsights, accounts };
-    cacheSet(cacheKey, responseData, 30_000); // 30-second cache on the list
+    cacheSet(cacheKey, responseData, 2 * 60_000); // 2-minute cache on the list
     res.json(responseData);
   } catch (err) {
     console.error('Error fetching campaigns:', err.response?.data || err.message);
@@ -293,45 +324,48 @@ exports.getCampaignDetails = async (req, res) => {
 
     const BREAKDOWN_FIELDS = 'spend,reach,impressions,clicks,ctr,cpm,cpc,actions,cost_per_action_type,action_values,date_start,date_stop';
 
-    // Core fetch: campaign config + adsets + aggregate insights (always)
-    const [campaignResp, adSetsResp, campaignInsightResp] = await Promise.all([
-      axios.get(`${BASE}/${id}`, {
-        params: {
-          access_token: token,
-          fields: [
-            'id', 'name', 'objective', 'status', 'effective_status', 'configured_status',
-            'daily_budget', 'lifetime_budget', 'budget_remaining', 'spend_cap',
-            'bid_strategy', 'buying_type', 'pacing_type',
-            'start_time', 'stop_time', 'created_time', 'updated_time',
-            'special_ad_categories', 'special_ad_category_country',
-            'promoted_object', 'issues_info', 'adlabels', 'source_campaign_id',
-          ].join(','),
-        },
-      }),
-      axios.get(`${BASE}/${id}/adsets`, {
-        params: {
-          access_token: token,
-          fields: [
-            'id', 'name', 'campaign_id', 'status', 'effective_status', 'configured_status',
-            'daily_budget', 'lifetime_budget', 'budget_remaining',
-            'daily_min_spend_target', 'daily_spend_cap', 'lifetime_min_spend_target', 'lifetime_spend_cap',
-            'bid_amount', 'bid_strategy', 'bid_constraints', 'pacing_type',
-            'optimization_goal', 'optimization_sub_event', 'billing_event',
-            'destination_type', 'promoted_object',
-            'targeting', 'targeting_optimization_types',
-            'frequency_control_specs', 'attribution_spec',
-            'start_time', 'end_time', 'created_time', 'updated_time',
-            'is_dynamic_creative', 'learning_stage_info', 'issues_info',
-            'adlabels', 'instagram_actor_id', 'source_adset_id',
-          ].join(','),
-          limit: 100,
-        },
-      }).catch((err) => {
-        if (err.response?.data?.error?.code === 17) throw err;
-        return { data: { data: [] } };
-      }),
-      axios.get(`${BASE}/${id}/insights`, { params: insightParams }).catch(() => null),
-    ]);
+    // Core fetch: campaign config + adsets + aggregate insights.
+    // Wrapped in withRateLimitRetry so a transient rate limit gets one automatic retry.
+    const [campaignResp, adSetsResp, campaignInsightResp] = await withRateLimitRetry(() =>
+      Promise.all([
+        axios.get(`${BASE}/${id}`, {
+          params: {
+            access_token: token,
+            fields: [
+              'id', 'name', 'objective', 'status', 'effective_status', 'configured_status',
+              'daily_budget', 'lifetime_budget', 'budget_remaining', 'spend_cap',
+              'bid_strategy', 'buying_type', 'pacing_type',
+              'start_time', 'stop_time', 'created_time', 'updated_time',
+              'special_ad_categories', 'special_ad_category_country',
+              'promoted_object', 'issues_info', 'adlabels', 'source_campaign_id',
+            ].join(','),
+          },
+        }),
+        axios.get(`${BASE}/${id}/adsets`, {
+          params: {
+            access_token: token,
+            fields: [
+              'id', 'name', 'campaign_id', 'status', 'effective_status', 'configured_status',
+              'daily_budget', 'lifetime_budget', 'budget_remaining',
+              'daily_min_spend_target', 'daily_spend_cap', 'lifetime_min_spend_target', 'lifetime_spend_cap',
+              'bid_amount', 'bid_strategy', 'bid_constraints', 'pacing_type',
+              'optimization_goal', 'optimization_sub_event', 'billing_event',
+              'destination_type', 'promoted_object',
+              'targeting', 'targeting_optimization_types',
+              'frequency_control_specs', 'attribution_spec',
+              'start_time', 'end_time', 'created_time', 'updated_time',
+              'is_dynamic_creative', 'learning_stage_info', 'issues_info',
+              'adlabels', 'instagram_actor_id', 'source_adset_id',
+            ].join(','),
+            limit: 100,
+          },
+        }).catch((err) => {
+          if (isRateLimit(err)) throw err; // let retry handle it
+          return { data: { data: [] } };
+        }),
+        axios.get(`${BASE}/${id}/insights`, { params: insightParams }).catch(() => null),
+      ])
+    );
 
     const campaign = campaignResp.data;
     const adSets = adSetsResp.data.data || [];
@@ -455,7 +489,7 @@ exports.getCampaignDetails = async (req, res) => {
         adsets: finalAdSets,
       },
     };
-    cacheSet(cacheKey, responseData, 60_000); // 60-second cache on campaign detail
+    cacheSet(cacheKey, responseData, 10 * 60_000); // 10-minute cache on campaign detail
     res.json(responseData);
   } catch (err) {
     console.error('Error fetching campaign details:', err.response?.data || err.message);
