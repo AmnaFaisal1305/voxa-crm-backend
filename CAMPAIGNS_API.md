@@ -36,17 +36,25 @@ All responses: `Content-Type: application/json`
 
 ### GET /api/campaigns
 Returns all campaigns across **all ad accounts** linked to this account — not just one.
-Use this for the campaigns list/table view.
+Includes performance metrics (spend, reach, results, etc.) per campaign — use this for the campaigns list/table view.
 
 **Request**
 ```
 GET /api/campaigns
+GET /api/campaigns?date_preset=last_7d
 ```
+
+**Query Params**
+
+| Param | Default | Options |
+|---|---|---|
+| `date_preset` | `last_30d` | `today`, `yesterday`, `last_7d`, `last_14d`, `last_30d`, `last_90d`, `this_month`, `last_month`, `this_quarter`, `last_year`, `maximum` (all time) |
 
 **Response — 200**
 ```json
 {
   "success": true,
+  "date_preset": "last_30d",
   "campaigns": [
     {
       "id": "120249381600010074",
@@ -67,13 +75,40 @@ GET /api/campaigns
       "created_time": "2026-09-14T01:14:40+0500",
       "updated_time": "2026-09-14T01:14:40+0500",
       "special_ad_categories": [],
-      "promoted_object": null,
       "issues_info": null,
       "source_campaign_id": "0",
       "ad_account_id": "act_1844573786356037",
       "ad_account_name": "THE PASSION BASE PAKISTAN",
       "page_id": "241112186077505",
-      "page_name": "Voxa Official Page"
+      "page_name": "Zaincom",
+      "insights": {
+        "spend": "507.15",
+        "reach": "68627",
+        "impressions": "147047",
+        "clicks": "2324",
+        "ctr": "1.580447",
+        "cpm": "3.448897",
+        "cpc": "0.218223",
+        "cpp": "7.389949",
+        "frequency": "2.142699",
+        "actions": {
+          "lead": "18",
+          "link_click": "1613",
+          "purchase": "54",
+          "landing_page_view": "1413",
+          "post_engagement": "1795"
+        },
+        "cost_per_action_type": {
+          "lead": "28.17",
+          "purchase": "9.39",
+          "link_click": "0.31"
+        },
+        "action_values": {
+          "purchase": "786.46"
+        },
+        "date_start": "2026-08-15",
+        "date_stop": "2026-09-14"
+      }
     }
   ],
   "accounts": [
@@ -85,6 +120,8 @@ GET /api/campaigns
   ]
 }
 ```
+
+> **Note:** `insights` will be `null` for campaigns that have never run or had no spend in the selected date range. Always null-check before rendering metrics.
 
 **Field reference**
 
@@ -98,7 +135,18 @@ GET /api/campaigns
 | `ad_account_id` | Which ad account this campaign belongs to |
 | `ad_account_name` | Human-readable ad account name — always present |
 | `page_id` | Facebook Page ID this campaign is linked to |
-| `page_name` | Facebook Page name — ready to display. Resolved from ad set level if not available at campaign level. Will be `null` for campaigns that don't use a page (e.g. `OUTCOME_SALES` running on pixel/website conversions) |
+| `page_name` | Facebook Page name — ready to display. Resolved from ad set level if not at campaign level. `null` for pixel/website campaigns (e.g. `OUTCOME_SALES`) |
+| `insights.spend` | Total amount spent in the date range |
+| `insights.reach` | Unique people who saw the ad |
+| `insights.impressions` | Total times ad was shown |
+| `insights.clicks` | Total clicks |
+| `insights.ctr` | Click-through rate (%) |
+| `insights.cpm` | Cost per 1000 impressions |
+| `insights.cpc` | Cost per click |
+| `insights.frequency` | Avg times each person saw the ad |
+| `insights.actions` | Map of result type → count (lead, purchase, link_click, etc.) |
+| `insights.cost_per_action_type` | Map of result type → cost per result |
+| `insights.action_values` | Map of result type → revenue value |
 
 ---
 
