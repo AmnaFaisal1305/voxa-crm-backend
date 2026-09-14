@@ -15,6 +15,7 @@ exports.getCampaigns = async (req, res) => {
       'start_time', 'stop_time', 'created_time', 'updated_time',
       'special_ad_categories', 'special_ad_category_country',
       'promoted_object', 'issues_info', 'adlabels', 'source_campaign_id',
+      'adsets{promoted_object}',
     ].join(',');
 
     // Fetch all ad accounts and all managed pages in parallel
@@ -55,9 +56,16 @@ exports.getCampaigns = async (req, res) => {
 
     const allCampaigns = accounts.flatMap((a) =>
       a.campaigns.map((c) => {
-        const pageId = c.promoted_object?.page_id || null;
+        // Try campaign-level promoted_object first, fall back to first adset that has a page_id
+        const campaignPageId = c.promoted_object?.page_id || null;
+        const adsetPageId = (c.adsets?.data || [])
+          .map((as) => as.promoted_object?.page_id)
+          .find(Boolean) || null;
+        const pageId = campaignPageId || adsetPageId;
+
+        const { adsets: _adsets, ...campaignData } = c;
         return {
-          ...c,
+          ...campaignData,
           ad_account_id: a.ad_account_id,
           ad_account_name: a.ad_account_name,
           page_id: pageId,
